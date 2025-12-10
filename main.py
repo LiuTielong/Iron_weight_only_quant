@@ -16,7 +16,7 @@ import sys
 sys.path.append(".")
 sys.path.append("./gptq")
 from gptq.datautils import get_loaders
-from weight_only_quant.quant_wrapper import quantize_model
+from quant_wrapper import quantize_model
 from utils import build_model_and_enc
 
 def setup_args():
