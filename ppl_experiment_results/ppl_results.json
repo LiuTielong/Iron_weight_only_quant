@@ -1,0 +1,10 @@
+{
+  "w4_group128": {
+    "wikitext": {
+      "perplexity": 11.281356621439535,
+      "num_tokens": 286720,
+      "num_chunks": 140,
+      "eval_time": 64.79281616210938
+    }
+  }
+}
