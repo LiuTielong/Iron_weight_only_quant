@@ -18,7 +18,7 @@ import sys
 import matplotlib.pyplot as plt
 
 sys.path.append(".")
-from utils import build_model_and_enc, get_module_by_name_suffix
+from utils import build_model_and_enc, get_module_by_name_suffix, visualize_fp16_bit_sparsity
 from quant_wrapper import quantize_model
 from quant_linear import QuantLinear
 
@@ -119,10 +119,12 @@ def main():
     layer_full_name, target_layer = find_target_layer(model, args.layer_name)
     activation_store: Dict[str, torch.Tensor] = {}
 
-    def _capture_activation(_module, _inp, output):
-        activation_store["activation"] = output.detach().cpu()
+    def _capture_activation(_module, _inp):
+        # Capture layer input (pre-weights)
+        if _inp and isinstance(_inp[0], torch.Tensor):
+            activation_store["activation"] = _inp[0].detach().cpu()
 
-    hook_handle = target_layer.register_forward_hook(_capture_activation)
+    hook_handle = target_layer.register_forward_pre_hook(_capture_activation)
 
     # 4) Run a short forward pass
     encoded = tokenizer(args.prompt, return_tensors="pt")
@@ -140,6 +142,7 @@ def main():
         activation_matrix = activation.reshape(-1, activation.shape[-1])
     else:
         activation_matrix = activation
+    num_tokens = activation_matrix.shape[0]
 
     print(f"\nCaptured activation from layer '{layer_full_name}':")
     print(f"Original shape: {tuple(activation.shape)}; flattened matrix shape: {tuple(activation_matrix.shape)}")
@@ -152,12 +155,23 @@ def main():
     for idx, (mn, mx) in enumerate(zip(min_vals.tolist(), max_vals.tolist())):
         print(f"  token {idx}: min={mn:.6f}, max={mx:.6f}")
 
-    # 5) Plot per-token activation distributions
-    num_tokens = activation_matrix.shape[0]
+    # 5) Per-token bit sparsity on 128-dim chunks (FP16 aligned mantissa bits)
+    chunk_size = 128
+    print(f"\nPer-token FP16 mantissa bit zero-counts (chunk_size={chunk_size}):")
+    for t in range(num_tokens):
+        print(f"Token {t}:")
+        for start in range(0, activation_matrix.shape[1], chunk_size):
+            end = min(start + chunk_size, activation_matrix.shape[1])
+            chunk = activation_matrix[t, start:end]
+            res = visualize_fp16_bit_sparsity(chunk, save_path=None)
+            zeros = res["zero_counts"].tolist()
+            print(f"  dims {start}-{end-1}: zeros per bit (13 bits) -> {zeros}")
+
+    # 6) Plot per-token activation distributions
     fig, axes = plt.subplots(num_tokens, 1, figsize=(8, max(2.0, num_tokens * 1.5)), sharex=True)
     if num_tokens == 1:
         axes = [axes]
-    for idx in range(num_tokens):
+    for idx in range(0,1):  # 先只画一个
         axes[idx].hist(activation_matrix[idx].numpy().ravel(), bins=50, color="steelblue", alpha=0.8)
         axes[idx].set_ylabel(f"tok{idx}")
     axes[-1].set_xlabel("Activation value")
@@ -166,7 +180,7 @@ def main():
     plt.savefig(args.save_path, dpi=200)
     print(f"\nSaved per-token activation distribution plot to: {args.save_path}")
 
-    # 6) Scatter plot: dimensions on x-axis, token values on y-axis
+    # 7) Scatter plot: dimensions on x-axis, token values on y-axis
     num_dims = activation_matrix.shape[1]
     seg_size = 512
     segments = list(range(0, num_dims, seg_size))

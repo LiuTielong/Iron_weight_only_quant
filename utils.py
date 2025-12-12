@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from fastchat.model import get_conversation_template
 
@@ -80,6 +81,7 @@ import transformers
 import transformers.models.llama.modeling_llama
 from torch.distributed import get_rank, is_initialized
 from functools import partial
+import matplotlib.pyplot as plt
 
 def rank0_print(*args):
     if is_initialized():
@@ -125,3 +127,81 @@ class CondenseRotaryEmbedding(torch.nn.Module):
 
 def replace_llama_with_condense(ratio):
     transformers.models.llama.modeling_llama.LlamaRotaryEmbedding = partial(CondenseRotaryEmbedding, ratio=ratio)
+
+
+def visualize_fp16_bit_sparsity(
+    data: torch.Tensor,
+    save_path: Optional[str] = "fp16_mantissa_bit_sparsity.png",
+):
+    """
+    将一组FP16数据解析为符号/指数/尾数, 按最大指数对齐尾数(补前导1, 次正规数补0),
+    右移后截断到13位, 并绘制每个bit位为0的次数。
+    Args:
+        data: 任意形状的tensor, 将被视为FP16数据。
+        save_path: 稀疏度柱状图的保存路径。
+    Returns:
+        一个dict, 包含解析出的各字段以及对齐后13位尾数的0计数。
+    """
+    if data.numel() == 0:
+        raise ValueError("Input tensor is empty.")
+
+    # 展平并确保是FP16
+    x = data.detach().to(torch.float16).flatten()
+    raw = x.view(torch.uint16)
+    raw_i32 = raw.to(torch.int32)  # torch.uint16 lacks bitshift on some backends
+
+    sign_bits = (raw_i32 >> 15) & 0x1               # 符号位
+    exp_bits = (raw_i32 >> 10) & 0x1F               # 5位指数
+    mant_bits = raw_i32 & 0x3FF                     # 10位尾数
+
+    bias = 15
+    is_subnormal = exp_bits == 0
+    exp_unbiased = torch.where(
+        is_subnormal,
+        torch.full_like(exp_bits, 1 - bias, dtype=torch.int32),
+        exp_bits.to(torch.int32) - bias,
+    )
+    max_exp = exp_unbiased.max()
+
+    # 补前导位 (正规数补1, 次正规补0)
+    leading = torch.where(is_subnormal, torch.zeros_like(mant_bits), torch.ones_like(mant_bits))
+    mantissa_with_lead = (leading << 10) | mant_bits  # 11位
+    mantissa_extended = (mantissa_with_lead.to(torch.int32) << 2)  # 添加两个低位0, 最多13位
+
+    # 按最大指数右移对齐, 超过13位部分截断
+    shift = (max_exp - exp_unbiased).clamp(min=0, max=31).to(torch.int32)
+    aligned = mantissa_extended >> shift
+    aligned = aligned & ((1 << 13) - 1)  # 仅保留低13位
+
+    bit_positions = torch.arange(13, device=aligned.device)
+    aligned_bits = ((aligned.unsqueeze(-1) >> bit_positions) & 0x1).to(torch.int32)  # [N, 13]
+    zero_counts = (aligned_bits == 0).sum(dim=0).cpu()
+    zero_counts = torch.flip(zero_counts, dims=[0])  # now index 0 corresponds to highest bit
+
+    # 绘制稀疏度柱状图（可选）
+    if save_path is not None:
+        plt.figure(figsize=(8, 3.5))
+        bits_for_plot = list(range(12, -1, -1))  # high bit on the left
+        plt.bar(bits_for_plot, zero_counts.numpy(), color="slateblue", alpha=0.85)
+        plt.xlabel("Aligned mantissa bit (12 = MSB, 0 = LSB after truncation)")
+        plt.ylabel("Zero count")
+        plt.title("FP16 aligned mantissa bit sparsity")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+
+    return {
+        "sign_bits": sign_bits.cpu(),
+        "exponent_bits": exp_bits.cpu(),
+        "mantissa_bits": mant_bits.cpu(),
+        "aligned_bits": aligned_bits.cpu(),  # 0/1, shape [N, 13]
+        "zero_counts": zero_counts,
+        "save_path": save_path,
+    }
+
+
+if __name__ == "__main__":
+    x = torch.randn(128, dtype=torch.float16)
+    out = visualize_fp16_bit_sparsity(x, save_path="bit_sparsity.png")
+    print("Zero counts per bit:", out["zero_counts"])
+    print("Plot saved to:", out["save_path"])
