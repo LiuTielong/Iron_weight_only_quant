@@ -24,3 +24,8 @@ CUDA_VISIBLE_DEVICES=5 python bcq/quantize_rtn_to_bcq.py --output_dir /home/liut
 # 将权重使用RTN量化到FP4数据格式
 CUDA_VISIBLE_DEVICES=4 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp4 --w_bits 4 --w_group_size 128 --w_symmetric --datasets wikitext
 CUDA_VISIBLE_DEVICES=4 python main.py --model_path /home/data/meta-llama/opt/125m/ --w_format fp4 --w_bits 4 --w_group_size 128 --w_symmetric --datasets wikitext
+
+
+
+
+CUDA_VISIBLE_DEVICES=0 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp4 --w_bits 6 4 --w_group_size -1 --datasets wikitext

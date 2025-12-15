@@ -15,12 +15,19 @@
                 "CUDA_VISIBLE_DEVICES": "0",
             },
             "args": [
-                "--model_path", "/home/data/meta-llama/opt/6.7b/",
-                "--prompt", "Hello, how are you?",
-                "--layer_name", "model.decoder.layers.0.fc2",
-                "--w_group_size", "128",
-                "--save_path", "token_hist.png",   
-                "--save_scatter_path", "token_scatter.png",
+                // "--model_path", "/home/data/meta-llama/opt/6.7b/",
+                // "--prompt", "Hello, how are you?",
+                // "--layer_name", "model.decoder.layers.0.fc2",
+                // "--w_group_size", "128",
+                // "--save_path", "token_hist.png",   
+                // "--save_scatter_path", "token_scatter.png",
+
+                "--model_path", "/home/data/meta-llama/opt/125m/",
+                "--w_bits", "4",
+                "--w_group_size", "128", 
+                "--w_symmetric", 
+                "--datasets", "wikitext",
+                "--w_format", "fp4"
             ]
         }
     ]
