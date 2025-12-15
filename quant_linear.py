@@ -6,68 +6,45 @@ from quant_funcs import pseudo_quantize_tensor
 MANTISSA_BITS = 12
 FP4_EXP_BITS = 2
 FP4_MANTISSA_BITS = 1
-FP4_EXP_BIAS = 1
+FP4_EXP_BIAS = 2 ** (FP4_EXP_BITS - 1) - 1
 FP6_EXP_BITS = 3
 FP6_MANTISSA_BITS = 2
-FP6_EXP_BIAS = 3
+FP6_EXP_BIAS = 2 ** (FP6_EXP_BITS - 1) - 1
 
 
 def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
-    将浮点张量量化为 FP4 (E2M1) 格式的 4bit 码字，存放在 uint8 的低 4 位。
+    将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
     """
     sign = (x < 0).to(torch.uint8)
     x_abs = x.abs()
     zero_mask = x_abs == 0
     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
-    # 计算指数并加偏置
+    max_exp_field = (1 << exp_bits) - 1
+    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
+
+    # 原始无偏指数
     exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
-    exp_unbiased = (exp_val + exp_bias).clamp(0, (1 << exp_bits) - 1)
 
-    # 调试：统计每组前八名的众数及出现次数（仅在二维输入时打印前10组）
-    # if exp_unbiased.dim() == 2:
-    #     num_groups = exp_unbiased.size(0)
-    #     max_val = int(exp_unbiased.max()) + 1
-    #     freq = torch.stack([
-    #         torch.bincount(exp_unbiased[g], minlength=max_val) for g in range(num_groups)
-    #     ], dim=0)
-    #     topk_size = min(8, max_val)
-    #     topk_vals, topk_idx = torch.topk(freq, k=topk_size, dim=1)
-    #     show = min(10, num_groups)
-    #     for g in range(show):
-    #         pairs = []
-    #         for k in range(topk_size):
-    #             pairs.append(f"exp{int(topk_idx[g, k])}:{int(topk_vals[g, k])}")
-    #         print(f"group {g}: " + ", ".join(pairs))
+    # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
+    is_subnormal = exp_val < min_normal_exp
 
-    # max_val = int(exp_unbiased.max()) + 1
-    # modes = []
-    # counts = []
-    # top2_sum = []
-    # for g in range(100):
-    #     freq = torch.bincount(exp_unbiased[g], minlength=max_val)
-    #     top2 = torch.topk(freq, k=min(3, freq.numel())).values     # 取前2个频次
-    #     modes.append(top2)
-    #     top2_sum.append(top2.sum())
-
-    # top2_sum = torch.stack(top2_sum)  # [num_groups]
-
-    # # 打印前10组的 top2 频次和
-    # for i in range(100):
-    #     print(f"group {i}: top2_freq_sum={int(top2_sum[i])}")
-    # for i in range(100):
-    #     print(exp_unbiased[i].sum())
-    # # 计算这里面为1的指数的比例
-    # exp_1 = exp_unbiased.sum() / (131072*128)
-
-    # 计算尾数 (1 位)，用最邻近舍入
+    # 正规数路径：指数夹在可表示范围内，再根据夹后的指数计算尾数
+    exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
+    exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
     mant_scale = 1 << mant_bits
-    mant = torch.round((x_abs_safe / torch.pow(2.0, exp_val.float()) - 1.0) * mant_scale)
-    mant = mant.clamp(0, mant_scale - 1).to(torch.uint8)
+    mant_normal = torch.round((x_abs_safe / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+    mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
 
-    code = (sign << (exp_bits + mant_bits)) | (exp_unbiased.to(torch.uint8) << mant_bits) | mant
-    # code = code & 0xF  # 仅低 4 位有效
+    # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
+    mant_sub = torch.round((x_abs_safe / torch.pow(2.0, float(min_normal_exp))) * mant_scale)
+    mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
+
+    exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
+    mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
+
+    code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
     # 零值强制编码为0，便于解码时恢复0
     code = torch.where(zero_mask, torch.zeros_like(code), code)
     return code
@@ -75,14 +52,25 @@ def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int 
 
 def _fp4_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
-    将 FP4 (E2M1) 码字还原为浮点。输入为 uint8/long，返回 FP32。
+    将 FP4 (E2M1) 码字还原为浮点，支持次正规。输入为 uint8/long，返回 FP32。
     """
     code = code.to(torch.uint8)
     zero_mask = code == 0
     sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
-    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).float() - float(exp_bias)
-    mant_field = (code & ((1 << mant_bits) - 1)).float() / float(1 << mant_bits)
-    value = ((-1.0) ** sign) * (1.0 + mant_field) * torch.pow(2.0, exp_field)
+    raw_exp = ((code >> mant_bits) & ((1 << exp_bits) - 1)).float()
+    mant_field = (code & ((1 << mant_bits) - 1)).float()
+
+    # 正规数：隐含1
+    exp_normal = raw_exp - float(exp_bias)
+    value_normal = (1.0 + mant_field / float(1 << mant_bits)) * torch.pow(2.0, exp_normal)
+
+    # 次正规：无隐含1，指数固定为 1 - bias
+    exp_sub = 1.0 - float(exp_bias)
+    value_sub = (mant_field / float(1 << mant_bits)) * torch.pow(2.0, exp_sub)
+
+    is_subnormal = raw_exp == 0
+    value = torch.where(is_subnormal, value_sub, value_normal)
+    value = ((-1.0) ** sign) * value
     return torch.where(zero_mask, torch.zeros_like(value), value)
 
 def _convert_bits_to_int(bits_tensor: torch.Tensor) -> torch.Tensor:
