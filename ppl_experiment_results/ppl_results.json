@@ -1,10 +1,10 @@
 {
-  "w4_group64": {
+  "w8_tensor": {
     "wikitext": {
-      "perplexity": 11.313666726274358,
+      "perplexity": 10.893308662076373,
       "num_tokens": 286720,
       "num_chunks": 140,
-      "eval_time": 167.13560509681702
+      "eval_time": 170.6471507549286
     }
   }
 }

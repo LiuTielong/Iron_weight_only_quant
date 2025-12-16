@@ -48,7 +48,7 @@ def setup_args():
                         help="Weight quantization group size (-1: per-tensor, -2: per-channel, >0: per-group)")
     parser.add_argument("--w_symmetric", action="store_true",
                         help="Use symmetric quantization for weights")
-    parser.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6"],
+    parser.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8"],
                         help="Weight format: 'int' (原有整数量化) 或 'fp4'/'fp6'")
     parser.add_argument("--mode", type=int, default=0, choices=[0, 1, 2],
                         help="0 for GPU, 1 for FIGLUT-F and 2 for FIGLUT-I")
@@ -233,6 +233,10 @@ def run_quantization_experiment(args):
                 plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
                 plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
                 plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
+            if args.w_format == "fp8" and 8 in args.w_bits:
+                plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
+                plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
+                plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
 
         # Initialize evaluator
         device = next(model.parameters()).device
