@@ -226,8 +226,13 @@ def run_quantization_experiment(args):
 
             model = quantize_model(model, quant_args)
             # 可视化
-            # plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
-            plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
+            if args.w_format == "fp4" and 4 in args.w_bits:
+                plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
+                plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
+            if args.w_format == "fp6" and 6 in args.w_bits:
+                plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
+                plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
+                plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
 
         # Initialize evaluator
         device = next(model.parameters()).device

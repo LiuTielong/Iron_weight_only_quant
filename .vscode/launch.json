@@ -23,11 +23,11 @@
                 // "--save_scatter_path", "token_scatter.png",
 
                 "--model_path", "/home/data/meta-llama/opt/6.7b/",
-                "--w_bits", "4",
+                "--w_bits", "6",
                 "--w_group_size", "128", 
                 "--w_symmetric", 
                 "--datasets", "wikitext",
-                "--w_format", "fp4"
+                "--w_format", "fp6"
             ]
         }
     ]
