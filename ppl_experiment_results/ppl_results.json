@@ -1,10 +1,10 @@
 {
   "w4_group64": {
     "wikitext": {
-      "perplexity": 11.13406987568552,
+      "perplexity": 11.313666726274358,
       "num_tokens": 286720,
       "num_chunks": 140,
-      "eval_time": 60.550666093826294
+      "eval_time": 167.13560509681702
     }
   }
 }

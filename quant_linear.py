@@ -38,7 +38,8 @@ def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int 
     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
 
     # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
-    mant_sub = torch.round((x_abs_safe / torch.pow(2.0, float(min_normal_exp))) * mant_scale)
+    subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
+    mant_sub = torch.round((x_abs_safe / subnorm_denom) * mant_scale)
     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
 
     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
@@ -66,7 +67,8 @@ def _fp4_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: i
 
     # 次正规：无隐含1，指数固定为 1 - bias
     exp_sub = 1.0 - float(exp_bias)
-    value_sub = (mant_field / float(1 << mant_bits)) * torch.pow(2.0, exp_sub)
+    exp_sub_tensor = torch.tensor(exp_sub, device=code.device)
+    value_sub = (mant_field / float(1 << mant_bits)) * torch.pow(torch.tensor(2.0, device=code.device), exp_sub_tensor)
 
     is_subnormal = raw_exp == 0
     value = torch.where(is_subnormal, value_sub, value_normal)
@@ -248,26 +250,39 @@ class QuantLinear(nn.Module):
                 fp4_max_value = (1.0 + (2**FP4_MANTISSA_BITS - 1) / (2**FP4_MANTISSA_BITS)) * (2.0 ** ((1 << FP4_EXP_BITS) - 1 - FP4_EXP_BIAS))
 
                 # 对齐与整数量化相同的粒度，使用对称 scale 将 max 对齐到 FP4 可表示的最大值
-                max_val = weight_tensor_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
-                scales = (max_val / fp4_max_value).clamp(min=1e-5)
+                if self.symmetric:
+                    max_val = weight_tensor_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+                    scales = (max_val / fp4_max_value).clamp(min=1e-5)
+                    zeros = None
+                    normalized = torch.clamp(weight_tensor_grouped / scales, min=-fp4_max_value, max=fp4_max_value)
+                else:
+                    max_val = weight_tensor_grouped.amax(dim=1, keepdim=True)
+                    min_val = weight_tensor_grouped.amin(dim=1, keepdim=True)
+                    mid_val = (max_val + min_val) * 0.5
+                    span = ((max_val - min_val) * 0.5).clamp(min=1e-5)
+                    scales = (span / fp4_max_value).clamp(min=1e-5)
+                    zeros = mid_val
+                    normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp4_max_value, max=fp4_max_value)
 
-                # 归一化后限制在 FP4 表示范围内再编码
-                normalized = torch.clamp(weight_tensor_grouped / scales, min=-fp4_max_value, max=fp4_max_value)
                 fp4_codes = _float_to_fp4(normalized)
 
                 # 保存 scale 形状
                 if self.w_group_size == -1:
-                    self.scales = scales.view(1, 1)
+                    self.scales = scales.view(1, 1).half()
+                    self.zeros = zeros.view(1, 1).half() if zeros is not None else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(original_shape[0], 1)
+                    self.scales = scales.view(original_shape[0], 1).half()
+                    self.zeros = zeros.view(original_shape[0], 1).half() if zeros is not None else None
                 else:
-                    self.scales = scales.view(-1, 1)
-                self.zeros = None
+                    self.scales = scales.view(-1, 1).half()
+                    self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
                 # 存 FP4 码字，并写回反量化后的权重便于前向
                 self.weight_fp4 = fp4_codes.view(original_shape)
                 self.weight_fp6 = None
                 dequantized = _fp4_to_float(fp4_codes).to(self.weight.data.dtype) * scales
+                if self.zeros is not None:
+                    dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)
                 self.quantized.fill_(True)
                 return
@@ -287,23 +302,36 @@ class QuantLinear(nn.Module):
                     raise ValueError("Invalid w_group_size")
 
                 fp6_max_value = (1.0 + (2**FP6_MANTISSA_BITS - 1) / (2**FP6_MANTISSA_BITS)) * (2.0 ** ((1 << FP6_EXP_BITS) - 1 - FP6_EXP_BIAS))
-                max_val = weight_tensor_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
-                scales = (max_val / fp6_max_value).clamp(min=1e-5)
-
-                normalized = torch.clamp(weight_tensor_grouped / scales, min=-fp6_max_value, max=fp6_max_value)
+                if self.symmetric:
+                    max_val = weight_tensor_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+                    scales = (max_val / fp6_max_value).clamp(min=1e-5)
+                    zeros = None
+                    normalized = torch.clamp(weight_tensor_grouped / scales, min=-fp6_max_value, max=fp6_max_value)
+                else:
+                    max_val = weight_tensor_grouped.amax(dim=1, keepdim=True)
+                    min_val = weight_tensor_grouped.amin(dim=1, keepdim=True)
+                    mid_val = (max_val + min_val) * 0.5
+                    span = ((max_val - min_val) * 0.5).clamp(min=1e-5)
+                    scales = (span / fp6_max_value).clamp(min=1e-5)
+                    zeros = mid_val
+                    normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp6_max_value, max=fp6_max_value)
                 fp6_codes = _float_to_fp4(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
 
                 if self.w_group_size == -1:
-                    self.scales = scales.view(1, 1)
+                    self.scales = scales.view(1, 1).half()
+                    self.zeros = zeros.view(1, 1).half() if zeros is not None else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(original_shape[0], 1)
+                    self.scales = scales.view(original_shape[0], 1).half()
+                    self.zeros = zeros.view(original_shape[0], 1).half() if zeros is not None else None
                 else:
-                    self.scales = scales.view(-1, 1)
-                self.zeros = None
+                    self.scales = scales.view(-1, 1).half()
+                    self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
                 self.weight_fp6 = fp6_codes.view(original_shape)
                 self.weight_fp4 = None
                 dequantized = _fp4_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
+                if self.zeros is not None:
+                    dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)
                 self.quantized.fill_(True)
                 return
@@ -382,16 +410,26 @@ class QuantLinear(nn.Module):
                 if self.w_group_size > 0:
                     original_shape = self.weight.shape
                     codes_grouped = self.weight_fp4.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1)
-                    dequantized_weight = (_fp4_to_float(codes_grouped).to(self.weight.dtype) * scales).view(original_shape)
+                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
+                    dequantized_weight = _fp4_to_float(codes_grouped).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        zeros = self.zeros.reshape(-1, 1).to(self.weight.dtype)
+                        dequantized_weight = dequantized_weight + zeros
+                    dequantized_weight = dequantized_weight.view(original_shape)
                 elif self.w_group_size == -1:
-                    scales = self.scales.view(1, 1)
+                    scales = self.scales.view(1, 1).to(self.weight.dtype)
                     dequantized_weight = _fp4_to_float(self.weight_fp4).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        dequantized_weight = dequantized_weight + self.zeros.view(1, 1).to(self.weight.dtype)
                 elif self.w_group_size == -2:
                     original_shape = self.weight.shape
                     codes_grouped = self.weight_fp4.reshape(original_shape[0], -1)
-                    scales = self.scales.reshape(original_shape[0], 1)
-                    dequantized_weight = (_fp4_to_float(codes_grouped).to(self.weight.dtype) * scales).view(original_shape)
+                    scales = self.scales.reshape(original_shape[0], 1).to(self.weight.dtype)
+                    dequantized_weight = _fp4_to_float(codes_grouped).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        zeros = self.zeros.reshape(original_shape[0], 1).to(self.weight.dtype)
+                        dequantized_weight = dequantized_weight + zeros
+                    dequantized_weight = dequantized_weight.view(original_shape)
                 else:
                     raise ValueError("Invalid w_group_size")
 
@@ -412,16 +450,26 @@ class QuantLinear(nn.Module):
                 if self.w_group_size > 0:
                     original_shape = self.weight.shape
                     codes_grouped = self.weight_fp6.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1)
-                    dequantized_weight = (_fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales).view(original_shape)
+                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
+                    dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        zeros = self.zeros.reshape(-1, 1).to(self.weight.dtype)
+                        dequantized_weight = dequantized_weight + zeros
+                    dequantized_weight = dequantized_weight.view(original_shape)
                 elif self.w_group_size == -1:
-                    scales = self.scales.view(1, 1)
+                    scales = self.scales.view(1, 1).to(self.weight.dtype)
                     dequantized_weight = _fp4_to_float(self.weight_fp6, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        dequantized_weight = dequantized_weight + self.zeros.view(1, 1).to(self.weight.dtype)
                 elif self.w_group_size == -2:
                     original_shape = self.weight.shape
                     codes_grouped = self.weight_fp6.reshape(original_shape[0], -1)
-                    scales = self.scales.reshape(original_shape[0], 1)
-                    dequantized_weight = (_fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales).view(original_shape)
+                    scales = self.scales.reshape(original_shape[0], 1).to(self.weight.dtype)
+                    dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
+                    if self.zeros is not None:
+                        zeros = self.zeros.reshape(original_shape[0], 1).to(self.weight.dtype)
+                        dequantized_weight = dequantized_weight + zeros
+                    dequantized_weight = dequantized_weight.view(original_shape)
                 else:
                     raise ValueError("Invalid w_group_size")
 
