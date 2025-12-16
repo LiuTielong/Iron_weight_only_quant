@@ -12,7 +12,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "env":{
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
             },
             "args": [
                 // "--model_path", "/home/data/meta-llama/opt/6.7b/",
@@ -22,7 +22,7 @@
                 // "--save_path", "token_hist.png",   
                 // "--save_scatter_path", "token_scatter.png",
 
-                "--model_path", "/home/data/meta-llama/opt/125m/",
+                "--model_path", "/home/data/meta-llama/opt/6.7b/",
                 "--w_bits", "4",
                 "--w_group_size", "128", 
                 "--w_symmetric", 

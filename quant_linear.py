@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 from quant_funcs import pseudo_quantize_tensor
 
 MANTISSA_BITS = 12
@@ -22,7 +23,7 @@ def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int 
     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
     max_exp_field = (1 << exp_bits) - 1
-    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
+    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
 
     # 原始无偏指数
     exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
@@ -74,6 +75,27 @@ def _fp4_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: i
     value = torch.where(is_subnormal, value_sub, value_normal)
     value = ((-1.0) ** sign) * value
     return torch.where(zero_mask, torch.zeros_like(value), value)
+
+
+def _count_fp4_values(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS):
+    """
+    统计 FP4 码字解码后的 15/16 个可表示值各自出现的次数。
+    返回 (values, counts, fig)，两者 shape 相同，fig 为已绘制的条形图。
+    """
+    decoded = _fp4_to_float(code, exp_bits=exp_bits, mant_bits=mant_bits, exp_bias=exp_bias).reshape(-1)
+    values, counts = torch.unique(decoded, sorted=True, return_counts=True)
+    values_np = values.cpu().numpy()
+    counts_np = counts.cpu().numpy()
+
+    # fig, ax = plt.subplots()
+    # ax.bar(range(len(values_np)), counts_np, tick_label=[f"{v:.4g}" for v in values_np])
+    # # 使用 ASCII 标签避免字体缺失警告
+    # ax.set_xlabel("FP4 value")
+    # ax.set_ylabel("Count")
+    # ax.set_title("FP4 decoded value histogram")
+    # ax.tick_params(axis='x', rotation=45)
+    # fig.savefig("./results/fp4_values.png")
+    return values, counts
 
 def _convert_bits_to_int(bits_tensor: torch.Tensor) -> torch.Tensor:
     """

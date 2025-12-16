@@ -18,6 +18,7 @@ sys.path.append("./gptq")
 from gptq.datautils import get_loaders
 from quant_wrapper import quantize_model
 from utils import build_model_and_enc
+from visualize_utils import *
 
 def setup_args():
     parser = argparse.ArgumentParser(description="Weight-only Quantization PPL Experiment")
@@ -224,6 +225,9 @@ def run_quantization_experiment(args):
                 quant_args.dataloader = None
 
             model = quantize_model(model, quant_args)
+            # 可视化
+            # plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
+            plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
 
         # Initialize evaluator
         device = next(model.parameters()).device
