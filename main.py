@@ -44,7 +44,7 @@ def setup_args():
                         help="Weight quantization bit widths to test")
     parser.add_argument("--w_group_size", type=int,
                         default=-2,
-                        choices=[-1, -2, 32, 64, 128, 256],
+                        choices=[-1, -2, 32, 64, 128, 256, 512, 1024],
                         help="Weight quantization group size (-1: per-tensor, -2: per-channel, >0: per-group)")
     parser.add_argument("--w_symmetric", action="store_true",
                         help="Use symmetric quantization for weights")
@@ -61,6 +61,7 @@ def setup_args():
                         help="Percent of average Hessian diagonal for dampening in GPTQ")
     parser.add_argument("--act_order", action="store_true",
                         help="Whether to apply activation order GPTQ heuristic")
+    parser.add_argument("--approximate", action="store_true", help="如果为真，表示使用近似方法进行量化")
 
     return parser.parse_args()
 
@@ -179,11 +180,12 @@ def run_quantization_experiment(args):
         if config['w_bit'] < 16:
             print(f"⚙️ Applying {quant_name} quantization...")
             class QuantArgs:
-                def __init__(self, w_bit, w_group_size, w_symmetric=False, mode=0, gptq=False, nsamples=128, percdamp=0.01, act_order=False, w_format="int"):
+                def __init__(self, w_bit, w_group_size, w_symmetric=False, mode=0, gptq=False, nsamples=128, percdamp=0.01, act_order=False, w_format="int", approximate=False):
                     self.w_bit = w_bit
                     self.w_group_size = w_group_size
                     self.w_symmetric = w_symmetric
                     self.w_format = w_format
+                    self.approximate = approximate
                     self.a_bit = 16  # Keep activation in FP16
                     self.a_group_size = 128
                     self.kv_bit = 16  # Keep KV cache in FP16
@@ -203,7 +205,8 @@ def run_quantization_experiment(args):
                 args.nsamples,
                 args.percdamp,
                 args.act_order,
-                args.w_format
+                args.w_format,
+                args.approximate
             )
 
             # 如果使用GPTQ，需要准备校准数据
@@ -226,17 +229,17 @@ def run_quantization_experiment(args):
 
             model = quantize_model(model, quant_args)
             # 可视化
-            if args.w_format == "fp4" and 4 in args.w_bits:
-                plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
-                plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
-            if args.w_format == "fp6" and 6 in args.w_bits:
-                plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
-                plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
-                plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
-            if args.w_format == "fp8" and 8 in args.w_bits:
-                plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
-                plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
-                plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
+            # if args.w_format == "fp4" and 4 in args.w_bits:
+            #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
+            #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
+            # if args.w_format == "fp6" and 6 in args.w_bits:
+            #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
+            #     plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
+            #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
+            # if args.w_format == "fp8" and 8 in args.w_bits:
+            #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
+            #     plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
+            #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
 
         # Initialize evaluator
         device = next(model.parameters()).device
