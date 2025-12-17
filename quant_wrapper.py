@@ -50,6 +50,7 @@ def quantize_model(model, args, quant_mix_gate=False):
                         symmetric=args.w_symmetric,
                         mode=getattr(args, 'mode', 0),
                         weight_format=w_format,
+                        approximate=getattr(args, "approximate", False),
                     )
                     # 替换
                     parent_module = model

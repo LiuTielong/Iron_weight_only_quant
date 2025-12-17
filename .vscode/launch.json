@@ -27,7 +27,8 @@
                 "--w_group_size", "128", 
                 "--w_symmetric", 
                 "--datasets", "wikitext",
-                "--w_format", "fp8"
+                "--w_format", "fp8",
+                "--approximate",
             ]
         }
     ]

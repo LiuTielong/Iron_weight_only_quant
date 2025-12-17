@@ -143,6 +143,11 @@ def _fp8_decode_aligned(
     hi_mask = exp_field >= hi_align_start
     shift = torch.clamp(hi_align_exp_field - exp_field, min=0)
     mant_aligned = torch.bitwise_right_shift(mant_padded, shift)
+
+    # debug
+    # mant_aligned = torch.bitwise_right_shift(mant_aligned, 3)
+    # mant_aligned = mant_aligned << 3
+    
     hi_unbiased = hi_align_exp_field - exp_bias
     value_hi = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * (2.0 ** float(hi_unbiased))
 
@@ -389,7 +394,10 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
-                decoded = _fp6e3m2_decode_aligned(codes, hi_align_start=4, hi_align_exp_field=7, tail_pad_bits=2, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype)
+                if FP6_EXP_BIAS == 3:
+                    decoded = _fp6e3m2_decode_aligned(codes, hi_align_start=4, hi_align_exp_field=7, tail_pad_bits=2, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype)
+                elif FP6_EXP_BIAS == 2:
+                    decoded = _fp4_to_float(codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype)
             elif self.weight_format == "fp8":
                 fp_max_value = (1.0 + (2**FP8_MANTISSA_BITS - 1) / (2**FP8_MANTISSA_BITS)) * (2.0 ** ((1 << FP8_EXP_BITS) - 1 - FP8_EXP_BIAS))
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
