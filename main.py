@@ -1,72 +1,32 @@
 #!/usr/bin/env python3
 """
-Weight-only Quantization Perplexity Experiment
-Supports LLaMA and OPT model families with configurable quantization settings.
-Evaluates different bit widths and granularities on WikiText, PTB, and C4 datasets.
+Unified entry: weight-only quantization + PPL evaluation or lm-evaluation-harness downstream tasks.
+
+- eval_mode=ppl: compute perplexity on WikiText/PTB/C4 style datasets.
+- eval_mode=lm_eval: run lm-evaluation-harness tasks (arc_easy, boolq, etc.).
 """
 
 import argparse
-import os
-import torch
 import json
-import time
 import math
+import os
+import time
 from pathlib import Path
+from typing import Optional, Tuple
+
+import torch
+
 import sys
 sys.path.append(".")
 sys.path.append("./gptq")
 from gptq.datautils import get_loaders
 from quant_wrapper import quantize_model
 from utils import build_model_and_enc
-from visualize_utils import *
 
-def setup_args():
-    parser = argparse.ArgumentParser(description="Weight-only Quantization PPL Experiment")
-    parser.add_argument("--model_path", type=str,
-                        required=True,
-                        help="Path to the model (supports LLaMA and OPT families)")
-    parser.add_argument("--output_dir", type=str,
-                        default="./ppl_experiment_results",
-                        help="Directory to save results")
-    parser.add_argument("--use_flash_attn", action="store_true",
-                        help="Use Flash Attention")
-    parser.add_argument("--datasets", nargs="+",
-                        default=["wikitext", "ptb", "c4"],
-                        choices=["wikitext", "ptb", "c4"],
-                        help="Datasets to evaluate on")
-    parser.add_argument("--sample_size", type=int, default=None,
-                        help="Maximum number of evaluation chunks (each chunk has length equal to the model sequence length)")
-    parser.add_argument("--local_dataset_dir", type=str,
-                        default="/home/liutielong/Files_2025/data/ppl_datasets",
-                        help="Directory containing local datasets")
-    parser.add_argument("--w_bits", nargs="+", type=int,
-                        default=[16, 8, 4],
-                        help="Weight quantization bit widths to test")
-    parser.add_argument("--w_group_size", type=int,
-                        default=-2,
-                        choices=[-1, -2, 32, 64, 128, 256, 512, 1024],
-                        help="Weight quantization group size (-1: per-tensor, -2: per-channel, >0: per-group)")
-    parser.add_argument("--w_symmetric", action="store_true",
-                        help="Use symmetric quantization for weights")
-    parser.add_argument("--w_format", type=str, default="int",
-                        choices=["int", "fp4", "fp6", "fp8", "bfp"],
-                        help="Weight format: 'int' (原有整数量化) 或 'fp4'/'fp6'/'fp8'，'bfp' 为分组共享指数BFP（使用 --w_bits 指定位宽）")
-    parser.add_argument("--quant_dim", type=int, default=0, choices=[0, 1],
-                        help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
-    parser.add_argument("--mode", type=int, default=0, choices=[0, 1, 2],
-                        help="0 for GPU, 1 for FIGLUT-F and 2 for FIGLUT-I")
-    # 关于gptq的参数
-    parser.add_argument("--gptq", action="store_true",
-                        help="Use GPTQ quantization")
-    parser.add_argument("--nsamples", type=int, default=128,
-                        help="Number of calibration samples for GPTQ")
-    parser.add_argument("--percdamp", type=float, default=0.01,
-                        help="Percent of average Hessian diagonal for dampening in GPTQ")
-    parser.add_argument("--act_order", action="store_true",
-                        help="Whether to apply activation order GPTQ heuristic")
-    parser.add_argument("--approximate", action="store_true", help="如果为真，表示使用近似方法进行量化")
+# lm-eval imports（仅在 lm_eval 模式下使用）
+from lm_eval import evaluator, tasks
+from lm_eval.models.huggingface import HFLM
 
-    return parser.parse_args()
 
 class SequentialPPLEvaluator:
     """Sequential perplexity evaluator matching GPTQ opt.py behavior."""
@@ -132,19 +92,128 @@ class SequentialPPLEvaluator:
         return ppl, total_tokens, nsamples
 
 
-def run_quantization_experiment(args):
-    """Main experiment function"""
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Quantize model then evaluate (PPL or lm-eval tasks)")
+    p.add_argument("--eval_mode", type=str, default="ppl", choices=["ppl", "lm_eval"], help="选择评测模式：ppl 或 lm_eval")
+    p.add_argument("--model_path", type=str, required=True, help="原始 FP16 模型目录")
+    p.add_argument("--device", type=str, default="cuda", help="推理设备，如 cuda 或 cpu")
+    p.add_argument("--use_flash_attn", action="store_true", help="是否启用 Flash Attention (构建模型时)")
+    p.add_argument("--output_dir", type=str, default="./ppl_experiment_results", help="结果输出目录（ppl 会写入文件）")
+    p.add_argument("--local_dataset_dir", type=str, default="/home/liutielong/Files_2025/data/ppl_datasets", help="PPL 数据集本地目录，可通过环境变量使用")
 
-    # Create output directory
+    # 量化参数
+    p.add_argument("--w_bits", nargs="+", type=int, default=[16, 8, 4], help="权重量化位宽列表，<16 则执行量化")
+    p.add_argument("--w_group_size", type=int, default=-2, choices=[-1, -2, 32, 64, 128, 256, 512, 1024], help="-1: per-tensor, -2: per-channel, >0: per-group")
+    p.add_argument("--w_symmetric", action="store_true", help="权重对称量化")
+    p.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8", "bfp"], help="权重量化格式")
+    p.add_argument("--quant_dim", type=int, default=1, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
+    p.add_argument("--mode", type=int, default=0, choices=[0, 1, 2], help="0: GPU, 1: FIGLUT-F, 2: FIGLUT-I")
+    p.add_argument("--approximate", action="store_true", help="近似量化")
+
+    # GPTQ 相关
+    p.add_argument("--gptq", action="store_true", help="是否使用 GPTQ")
+    p.add_argument("--nsamples", type=int, default=128, help="GPTQ 校准样本数")
+    p.add_argument("--percdamp", type=float, default=0.01, help="GPTQ damp 参数")
+    p.add_argument("--act_order", action="store_true", help="GPTQ activation order")
+    p.add_argument("--calib_dataset", type=str, default="wikitext2", help="GPTQ 校准数据集 (get_loaders 名称)")
+
+    # PPL 评测参数
+    p.add_argument("--datasets", nargs="+", default=["wikitext", "ptb", "c4"], choices=["wikitext", "ptb", "c4"], help="PPL 评测数据集")
+    p.add_argument("--sample_size", type=int, default=None, help="每个数据集使用的 chunk 数（None 表示全量）")
+
+    # lm-eval 评测参数
+    p.add_argument("--tasks", nargs="+", default=["arc_easy"], help="lm-eval 任务列表")
+    p.add_argument("--num_fewshot", type=int, default=0, help="few-shot 样本数")
+    p.add_argument("--batch_size", type=int, default=1, help="lm-eval batch size（传给 HFLM）")
+    p.add_argument("--max_batch_size", type=int, default=None, help="lm-eval 最大自适应 batch size")
+    p.add_argument("--offline", action="store_true", help="lm-eval 强制离线，只用本地缓存")
+    p.add_argument("--hf_cache", type=str, default=None, help="可选：指定 HF 数据/模型缓存目录")
+
+    return p.parse_args()
+
+
+def prepare_env(args: argparse.Namespace) -> None:
+    """Prepare HF offline/cache env for lm-eval."""
+    if args.offline:
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        for key in ("HF_ENDPOINT", "HF_MIRROR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            os.environ.pop(key, None)
+    if args.hf_cache:
+        os.environ["HF_HOME"] = args.hf_cache
+        os.environ["HF_DATASETS_CACHE"] = args.hf_cache
+
+
+def make_quant_args(args: argparse.Namespace, w_bit: int):
+    class QuantArgs:
+        def __init__(self):
+            self.w_bit = w_bit
+            self.w_group_size = args.w_group_size
+            self.w_symmetric = args.w_symmetric
+            self.w_format = args.w_format
+            self.approximate = args.approximate
+            self.quant_dim = args.quant_dim
+            self.a_bit = 16
+            self.a_group_size = 128
+            self.kv_bit = 16
+            self.kv_group_size = 128
+            self.mode = args.mode
+            self.gptq = args.gptq
+            self.nsamples = args.nsamples
+            self.percdamp = args.percdamp
+            self.act_order = args.act_order
+            self.dataloader = None
+    return QuantArgs()
+
+
+def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_dataset: Optional[str] = None) -> Tuple[torch.nn.Module, object]:
+    """Load model/tokenizer, run quantization (on CPU) if needed, and move to device."""
+    model, tokenizer = build_model_and_enc(
+        args.model_path,
+        args.use_flash_attn,
+        kv_bit=16,
+        kv_group_size=128,
+    )
+
+    if w_bit < 16:
+        print(f"⚙️ Applying quantization: w_bit={w_bit}, group={args.w_group_size}, format={args.w_format}")
+        original_device = next(model.parameters()).device
+        model = model.cpu()
+        torch.cuda.empty_cache()
+        qargs = make_quant_args(args, w_bit)
+        if args.gptq:
+            dataset_name = calib_dataset or args.calib_dataset
+            # 兼容 wikitext -> wikitext2
+            if dataset_name == "wikitext":
+                dataset_name = "wikitext2"
+            dataloader, _ = get_loaders(
+                dataset_name,
+                nsamples=args.nsamples,
+                seed=0,
+                model=args.model_path,
+                seqlen=2048,
+            )
+            qargs.dataloader = dataloader
+        model = quantize_model(model, qargs)
+        model = model.to(device)
+        torch.cuda.empty_cache()
+    else:
+        model = model.to(device)
+
+    model.eval()
+    return model, tokenizer
+
+
+def run_ppl(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
     results = {}
 
-    # Generate quantization configurations based on parameters
-    quant_configs = {}
+    if args.local_dataset_dir:
+        os.environ["LOCAL_PPL_DATASET_DIR"] = args.local_dataset_dir
 
-    # Determine granularity name
     if args.w_group_size == -1:
         granularity = "tensor"
     elif args.w_group_size == -2:
@@ -152,187 +221,81 @@ def run_quantization_experiment(args):
     else:
         granularity = f"group{args.w_group_size}"
 
-    # Generate configs for each bit width
+    print(f"🚀 Starting PPL experiment on {args.datasets}")
     for w_bit in args.w_bits:
         config_name = f"w{w_bit}_{granularity}"
-        quant_configs[config_name] = {
-            'w_bit': w_bit,
-            'w_group_size': args.w_group_size
-        }
-
-    print(f"🚀 Starting Weight-only Quantization Experiment")
-    print(f"📁 Model: {args.model_path}")
-    print(f"📊 Datasets: {args.datasets}")
-    print(f"🔢 Quantizations: {list(quant_configs.keys())}")
-
-    for quant_name, config in quant_configs.items():
-        print(f"\n{'='*50}")
-        print(f"🔄 Testing {quant_name.upper()} Quantization")
-        print(f"{'='*50}")
-
-        # Load model and tokenizer
-        print("📥 Loading model and tokenizer...")
-        model, tokenizer = build_model_and_enc(
-            args.model_path,
-            args.use_flash_attn,
-            kv_bit=16,  # Keep KV cache in FP16
-            kv_group_size=128
-        )
-
-        # Apply quantization
-        if config['w_bit'] < 16:
-            print(f"⚙️ Applying {quant_name} quantization...")
-            original_device = next(model.parameters()).device
-            # 将量化阶段放到CPU，避免占用GPU显存
-            model = model.cpu()
-            torch.cuda.empty_cache()
-
-            class QuantArgs:
-                def __init__(self, w_bit, w_group_size, w_symmetric=False, mode=0, gptq=False, nsamples=128, percdamp=0.01, act_order=False, w_format="int", approximate=False, quant_dim=0):
-                    self.w_bit = w_bit
-                    self.w_group_size = w_group_size
-                    self.w_symmetric = w_symmetric
-                    self.w_format = w_format
-                    self.approximate = approximate
-                    self.quant_dim = quant_dim
-                    self.a_bit = 16  # Keep activation in FP16
-                    self.a_group_size = 128
-                    self.kv_bit = 16  # Keep KV cache in FP16
-                    self.kv_group_size = 128
-                    self.mode = mode
-                    self.gptq = gptq
-                    self.nsamples = nsamples
-                    self.percdamp = percdamp
-                    self.act_order = act_order
-
-            quant_args = QuantArgs(
-                config['w_bit'],
-                config['w_group_size'],
-                args.w_symmetric,
-                args.mode,
-                args.gptq,
-                args.nsamples,
-                args.percdamp,
-                args.act_order,
-                args.w_format,
-                args.approximate,
-                args.quant_dim,
-            )
-
-            # 如果使用GPTQ，需要准备校准数据
-            if args.gptq:
-                print("📊 Preparing calibration data for GPTQ...")
-                # 使用第一个数据集作为校准数据
-                calib_dataset = args.datasets[0]
-                if calib_dataset == "wikitext":
-                    calib_dataset = "wikitext2"
-                dataloader, _ = get_loaders(
-                    calib_dataset,
-                    nsamples=args.nsamples,
-                    seed=0,
-                    model=args.model_path,
-                    seqlen=2048
-                )
-                quant_args.dataloader = dataloader
-            else:
-                quant_args.dataloader = None
-
-            model = quantize_model(model, quant_args)
-            # 量化完成后移回原始设备（通常是GPU）
-            model = model.to(original_device)
-            torch.cuda.empty_cache()
-            # 可视化
-            # if args.w_format == "fp4" and 4 in args.w_bits:
-            #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
-            #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
-            # if args.w_format == "fp6" and 6 in args.w_bits:
-            #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
-            #     plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
-            #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
-            # if args.w_format == "fp8" and 8 in args.w_bits:
-            #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
-            #     plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
-            #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
-
-        # Initialize evaluator
-        device = next(model.parameters()).device
-        model = model.half()
-        evaluator = SequentialPPLEvaluator(model, args.model_path, device)
-
-        results[quant_name] = {}
-
-        # Evaluate on each dataset
+        print(f"\n{'='*50}\n🔄 Testing {config_name.upper()} Quantization\n{'='*50}")
+        calib_ds = args.datasets[0] if args.gptq else None
+        model, tokenizer = build_and_quantize(args, w_bit, args.device, calib_dataset=calib_ds)
+        evaluator = SequentialPPLEvaluator(model.half(), args.model_path, args.device)
+        results[config_name] = {}
         for dataset_name in args.datasets:
             print(f"\n📊 Evaluating on {dataset_name.upper()}...")
-
             start_time = time.time()
             ppl, token_count, chunk_count = evaluator.calculate_ppl(dataset_name, max_chunks=args.sample_size)
-            end_time = time.time()
-
-            results[quant_name][dataset_name] = {
-                'perplexity': ppl,
-                'num_tokens': token_count,
-                'num_chunks': chunk_count,
-                'eval_time': end_time - start_time
+            elapsed = time.time() - start_time
+            results[config_name][dataset_name] = {
+                "perplexity": ppl,
+                "num_tokens": token_count,
+                "num_chunks": chunk_count,
+                "eval_time": elapsed,
             }
-
-            print(f"📝 Evaluated {chunk_count} chunks ({token_count} tokens)")
-            print(f"📈 Perplexity: {ppl:.4f}")
-            print(f"⏱️ Time: {end_time - start_time:.2f}s")
-
-        # Clean up GPU memory
+            print(f"📝 {dataset_name}: chunks={chunk_count}, tokens={token_count}, ppl={ppl:.4f}, time={elapsed:.2f}s")
         del model, tokenizer
         torch.cuda.empty_cache()
 
-    # Save results
     results_file = output_dir / "ppl_results.json"
-    with open(results_file, 'w') as f:
+    with open(results_file, "w") as f:
         json.dump(results, f, indent=2)
+    print(f"\n💾 PPL results saved to: {results_file}")
 
-    # Print summary table
-    print(f"\n{'='*70}")
-    print("📊 PERPLEXITY RESULTS SUMMARY")
-    print(f"{'='*70}")
 
-    # Print header
-    header = f"{'Dataset':<12}"
-    for quant_name in quant_configs.keys():
-        header += f"{quant_name.upper():>12s}"
-    print(header)
-    print("-" * 70)
+def run_lm_eval(args: argparse.Namespace) -> None:
+    prepare_env(args)
+    all_results = {}
+    for w_bit in args.w_bits:
+        config_name = f"w{w_bit}_g{args.w_group_size}"
+        print(f"\n{'='*50}\n🔄 Evaluating {config_name.upper()} on lm-eval tasks\n{'='*50}")
+        model, tokenizer = build_and_quantize(args, w_bit, args.device, calib_dataset=args.calib_dataset)
+        hf_lm = HFLM(
+            pretrained=model,
+            tokenizer=tokenizer,
+            backend="causal",
+            device=args.device,
+            batch_size=args.batch_size,
+            max_batch_size=args.max_batch_size,
+            dtype="auto",
+            trust_remote_code=False,
+        )
+        task_manager = tasks.TaskManager()
+        res = evaluator.simple_evaluate(
+            model=hf_lm,
+            tasks=args.tasks,
+            num_fewshot=args.num_fewshot,
+            batch_size=None,
+            task_manager=task_manager,
+        )
+        all_results[config_name] = res["results"]
+        print(json.dumps(res["results"], indent=2, ensure_ascii=False))
+        del model, tokenizer, hf_lm
+        torch.cuda.empty_cache()
 
-    # Print results for each dataset
-    for dataset in args.datasets:
-        if any(dataset in results.get(quant_name, {}) for quant_name in quant_configs.keys()):
-            row = f"{dataset.upper():<12}"
-            for quant_name in quant_configs.keys():
-                if dataset in results.get(quant_name, {}):
-                    ppl = results[quant_name][dataset]['perplexity']
-                    row += f"{ppl:12.2f}"
-                else:
-                    row += f"{'N/A':>12s}"
-            print(row)
+    # 如需保存 lm-eval 结果
+    out_path = Path(args.output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    results_file = out_path / "lm_eval_results.json"
+    with open(results_file, "w") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\n💾 lm-eval results saved to: {results_file}")
 
-    print(f"\n💾 Results saved to: {results_file}")
 
-    return results
+def main():
+    args = parse_args()
+    if args.eval_mode == "ppl":
+        run_ppl(args)
+    else:
+        run_lm_eval(args)
+
 
 if __name__ == "__main__":
-    args = setup_args()
-
-    # Validate model path
-    if not Path(args.model_path).exists():
-        print(f"❌ Model path does not exist: {args.model_path}")
-        print("Please update --model_path to point to your model (LLaMA or OPT)")
-        exit(1)
-
-    print("🚀 Starting Weight-only Quantization PPL Experiment")
-    print(f"📁 Model: {args.model_path}")
-    print(f"📊 Datasets: {', '.join(args.datasets)}")
-    print(f"🔢 Bit widths: {args.w_bits}")
-    print(f"🔧 Group size: {args.w_group_size}")
-
-    if args.local_dataset_dir:
-        os.environ["LOCAL_PPL_DATASET_DIR"] = args.local_dataset_dir
-
-    results = run_quantization_experiment(args)
+    main()
