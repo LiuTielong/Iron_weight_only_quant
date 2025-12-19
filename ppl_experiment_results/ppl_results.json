@@ -1,10 +1,10 @@
 {
   "w8_group128": {
     "wikitext": {
-      "perplexity": 12.867996064897342,
+      "perplexity": 11.096409487820061,
       "num_tokens": 286720,
       "num_chunks": 140,
-      "eval_time": 244.36462926864624
+      "eval_time": 39.6945595741272
     }
   }
 }

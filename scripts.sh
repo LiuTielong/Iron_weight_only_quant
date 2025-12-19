@@ -27,6 +27,9 @@ CUDA_VISIBLE_DEVICES=4 python main.py --model_path /home/data/meta-llama/opt/125
 
 
 
-
+# 近似量化
 CUDA_VISIBLE_DEVICES=0 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp8 --w_bits 8 --w_group_size -1 --datasets wikitext --w_symmetric 
-CUDA_VISIBLE_DEVICES=0 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp8 --w_bits 8 --w_group_size 128 --datasets wikitext --w_symmetric --approximate
+CUDA_VISIBLE_DEVICES=1 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp8 --w_bits 8 --w_group_size 128 --datasets wikitext --w_symmetric --approximate
+
+
+# 做lm_eval测试的脚本
