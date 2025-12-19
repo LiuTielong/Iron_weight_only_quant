@@ -15,6 +15,9 @@ def quantize_model(model, args, quant_mix_gate=False):
     if (args.w_bit is not None and args.w_bit < 16) and (args.a_bit is None or args.a_bit >= 16):
         assert args.w_bit > 0 and args.w_bit < 16, "Weight bitwidth should be an integer between [1, 16] for weigth-only quantization, please check."
         w_format = getattr(args, 'w_format', 'int').lower()
+        is_bfp = w_format.startswith("bfp")
+        if is_bfp and getattr(args, "w_group_size", -1) <= 0:
+            raise ValueError("BFP 量化仅支持分组量化，请设置正的 w_group_size（例如128）")
 
         # 判断使用哪种量化方法
         if hasattr(args, 'gptq') and args.gptq:
@@ -39,7 +42,12 @@ def quantize_model(model, args, quant_mix_gate=False):
 
             torch.cuda.empty_cache()
         else:
-            print("使用RTN (Round-to-Nearest) 量化")
+            if is_bfp:
+                digits = "".join(ch for ch in w_format if ch.isdigit())
+                bfp_bits = int(digits) if digits else getattr(args, "w_bit", 4)
+                print(f"使用BFP分组量化（共享指数、每值{bfp_bits-1}bit尾数+符号，共{bfp_bits}bit）")
+            else:
+                print("使用RTN (Round-to-Nearest) 量化")
             # 用QuantLinear替换Linear层
             for name, module in model.named_modules():
                 if isinstance(module, torch.nn.Linear) and 'lm_head' not in name and 'output_layer' not in name:
@@ -51,6 +59,7 @@ def quantize_model(model, args, quant_mix_gate=False):
                         mode=getattr(args, 'mode', 0),
                         weight_format=w_format,
                         approximate=getattr(args, "approximate", False),
+                        quant_dim=getattr(args, "quant_dim", 0),
                     )
                     # 替换
                     parent_module = model

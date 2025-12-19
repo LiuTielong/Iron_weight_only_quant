@@ -48,8 +48,11 @@ def setup_args():
                         help="Weight quantization group size (-1: per-tensor, -2: per-channel, >0: per-group)")
     parser.add_argument("--w_symmetric", action="store_true",
                         help="Use symmetric quantization for weights")
-    parser.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8"],
-                        help="Weight format: 'int' (原有整数量化) 或 'fp4'/'fp6'")
+    parser.add_argument("--w_format", type=str, default="int",
+                        choices=["int", "fp4", "fp6", "fp8", "bfp"],
+                        help="Weight format: 'int' (原有整数量化) 或 'fp4'/'fp6'/'fp8'，'bfp' 为分组共享指数BFP（使用 --w_bits 指定位宽）")
+    parser.add_argument("--quant_dim", type=int, default=0, choices=[0, 1],
+                        help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
     parser.add_argument("--mode", type=int, default=0, choices=[0, 1, 2],
                         help="0 for GPU, 1 for FIGLUT-F and 2 for FIGLUT-I")
     # 关于gptq的参数
@@ -179,13 +182,19 @@ def run_quantization_experiment(args):
         # Apply quantization
         if config['w_bit'] < 16:
             print(f"⚙️ Applying {quant_name} quantization...")
+            original_device = next(model.parameters()).device
+            # 将量化阶段放到CPU，避免占用GPU显存
+            model = model.cpu()
+            torch.cuda.empty_cache()
+
             class QuantArgs:
-                def __init__(self, w_bit, w_group_size, w_symmetric=False, mode=0, gptq=False, nsamples=128, percdamp=0.01, act_order=False, w_format="int", approximate=False):
+                def __init__(self, w_bit, w_group_size, w_symmetric=False, mode=0, gptq=False, nsamples=128, percdamp=0.01, act_order=False, w_format="int", approximate=False, quant_dim=0):
                     self.w_bit = w_bit
                     self.w_group_size = w_group_size
                     self.w_symmetric = w_symmetric
                     self.w_format = w_format
                     self.approximate = approximate
+                    self.quant_dim = quant_dim
                     self.a_bit = 16  # Keep activation in FP16
                     self.a_group_size = 128
                     self.kv_bit = 16  # Keep KV cache in FP16
@@ -206,7 +215,8 @@ def run_quantization_experiment(args):
                 args.percdamp,
                 args.act_order,
                 args.w_format,
-                args.approximate
+                args.approximate,
+                args.quant_dim,
             )
 
             # 如果使用GPTQ，需要准备校准数据
@@ -228,6 +238,9 @@ def run_quantization_experiment(args):
                 quant_args.dataloader = None
 
             model = quantize_model(model, quant_args)
+            # 量化完成后移回原始设备（通常是GPU）
+            model = model.to(original_device)
+            torch.cuda.empty_cache()
             # 可视化
             # if args.w_format == "fp4" and 4 in args.w_bits:
             #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")

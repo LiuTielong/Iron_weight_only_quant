@@ -69,7 +69,8 @@ def parse_args() -> argparse.Namespace:
         help="-1: per-tensor, -2: per-channel, >0: per-group",
     )
     p.add_argument("--w_symmetric", action="store_true", help="权重对称量化")
-    p.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8"], help="权重量化格式")
+    p.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8", "bfp"], help="权重量化格式")
+    p.add_argument("--quant_dim", type=int, default=0, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
     p.add_argument("--mode", type=int, default=0, choices=[0, 1, 2], help="0: GPU, 1: FIGLUT-F, 2: FIGLUT-I")
 
     # GPTQ 相关
@@ -116,6 +117,7 @@ def build_quantized_model(args: argparse.Namespace):
                 self.w_symmetric = args.w_symmetric
                 self.w_format = args.w_format
                 self.approximate = args.approximate
+                self.quant_dim = args.quant_dim
                 self.a_bit = 16
                 self.a_group_size = 128
                 self.kv_bit = 16

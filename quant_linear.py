@@ -321,7 +321,7 @@ class QuantLinear(nn.Module):
     """
     自定义量化线性层, 支持量化后的权重和FP16激活值之间的矩阵乘法
     """
-    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False):
+    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0):
         """
         Args:
             in_features: 输入特征数
@@ -340,9 +340,11 @@ class QuantLinear(nn.Module):
         self.w_group_size = w_group_size
         self.symmetric = symmetric
         self.mode = mode
-        self.weight_format = weight_format.lower()
+        self.quant_dim = quant_dim  # 0: 按行/输入维分组; 1: 按列/输出维分组（转置后分组）
+        raw_format = weight_format.lower()
+        self.weight_format = "bfp" if raw_format.startswith("bfp") else raw_format
         self.approximate = approximate
-        if self.weight_format not in {"int", "fp4", "fp6", "fp8"}:
+        if self.weight_format not in {"int", "fp4", "fp6", "fp8", "bfp"}:
             raise ValueError(f"Unsupported weight_format: {weight_format}")
 
         # 创建权重和偏置参数
@@ -359,6 +361,8 @@ class QuantLinear(nn.Module):
         self.register_buffer("weight_fp4", None)
         self.register_buffer("weight_fp6", None)
         self.register_buffer("weight_fp8", None)
+        self.register_buffer("weight_bfp_mantissa", None)
+        self.register_buffer("weight_bfp_exponent", None)
         
         self.reset_parameters()
 
@@ -375,11 +379,20 @@ class QuantLinear(nn.Module):
         with torch.no_grad():
             original_shape = self.weight.shape  # [out_features, in_features]
             weight = self.weight.data
-
             if self.w_group_size <= 0:
                 raise ValueError("approximate 仅支持分组量化，w_group_size 必须 > 0")
-            assert weight.shape[-1] % self.w_group_size == 0
-            weight_grouped = weight.reshape(-1, self.w_group_size)
+
+            if self.quant_dim == 1:
+                weight_t = weight.t()  # [in_features, out_features]
+                assert weight_t.shape[-1] % self.w_group_size == 0
+                weight_grouped = weight_t.reshape(-1, self.w_group_size)
+                regroup_shape = weight_t.shape
+                regroup_transpose = True
+            else:
+                assert weight.shape[-1] % self.w_group_size == 0
+                weight_grouped = weight.reshape(-1, self.w_group_size)
+                regroup_shape = weight.shape
+                regroup_transpose = False
 
             if self.weight_format == "fp4":
                 fp_max_value = (1.0 + (2**FP4_MANTISSA_BITS - 1) / (2**FP4_MANTISSA_BITS)) * (2.0 ** ((1 << FP4_EXP_BITS) - 1 - FP4_EXP_BIAS))
@@ -404,7 +417,7 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
-                decoded = _fp8_decode_aligned(codes, hi_align_start=12, hi_align_exp_field=15, tail_pad_bits=1, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype)
+                decoded = _fp8_decode_aligned(codes, hi_align_start=12, hi_align_exp_field=15, tail_pad_bits=0, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype)
             else:
                 raise NotImplementedError("approximate 目前仅支持 fp4/fp8")
 
@@ -412,12 +425,24 @@ class QuantLinear(nn.Module):
             self.zeros = None
 
             dequantized_grouped = decoded * scales
-            dequantized = dequantized_grouped.view(weight.shape)
+            if regroup_transpose:
+                dequantized = dequantized_grouped.view(regroup_shape).t()
+            else:
+                dequantized = dequantized_grouped.view(weight.shape)
 
             # 缓存码字
-            self.weight_fp4 = codes if self.weight_format == "fp4" else None
-            self.weight_fp6 = codes if self.weight_format == "fp6" else None
-            self.weight_fp8 = codes if self.weight_format == "fp8" else None
+            if self.weight_format == "fp4":
+                self.weight_fp4 = codes.view(regroup_shape).t() if regroup_transpose else codes.view(weight.shape)
+                self.weight_fp6 = None
+                self.weight_fp8 = None
+            elif self.weight_format == "fp6":
+                self.weight_fp6 = codes.view(regroup_shape).t() if regroup_transpose else codes.view(weight.shape)
+                self.weight_fp4 = None
+                self.weight_fp8 = None
+            elif self.weight_format == "fp8":
+                self.weight_fp8 = codes.view(regroup_shape).t() if regroup_transpose else codes.view(weight.shape)
+                self.weight_fp4 = None
+                self.weight_fp6 = None
 
             self.weight.data = dequantized.view(original_shape)
             self.quantized.fill_(True)
@@ -430,6 +455,58 @@ class QuantLinear(nn.Module):
         with torch.no_grad():
             if self.approximate:
                 return self.quantize_weight_approximate()
+            if self.weight_format == "bfp":
+                if self.w_group_size <= 0:
+                    raise ValueError("BFP 仅支持分组量化，请将 w_group_size 设为正数")
+
+                original_shape = self.weight.shape  # [out_features, in_features]
+                weight_tensor = self.weight.data
+                assert original_shape[-1] % self.w_group_size == 0
+                weight_tensor_grouped = weight_tensor.reshape(-1, self.w_group_size)
+
+                # 1) 先转为 FP16 并拆出 sign/exp/mantissa 字段
+                weight_fp16 = weight_tensor_grouped.to(torch.float16)
+                bits = weight_fp16.view(torch.int16).to(torch.int32)
+                sign = (bits >> 15) & 0x1                 # [g, s]
+                exp = (bits >> 10) & 0x1F                 # 5-bit 指数字段
+                mant = bits & 0x3FF                       # 10-bit 尾数字段
+
+                # 2) 尾数扩展前导1（正规数），次正规保持0
+                leading = torch.where(exp == 0, torch.zeros_like(exp), torch.ones_like(exp))
+                mant_with_leading = (leading << 10) | mant  # 11-bit 尾数
+
+                # 3) 找到每组的最大指数，所有尾数按指数差右移对齐
+                exp_block = exp.max(dim=1, keepdim=True)[0]
+                shift = torch.clamp(exp_block - exp, min=0)
+                mant_aligned = torch.bitwise_right_shift(mant_with_leading, shift)
+
+                # 4) 按 w_bit 控制保留的尾数位数（含前导1），高位截断+舍入
+                target_mant_bits = min(self.w_bit - 1, 11)  # 含前导1，最多11位
+                shift_down = max(0, 11 - target_mant_bits)
+                if shift_down > 0:
+                    mant_rounded = mant_aligned >> shift_down
+                else:
+                    mant_rounded = mant_aligned
+                mant_max = (1 << target_mant_bits) - 1
+                mant_rounded = torch.clamp(mant_rounded, max=mant_max)
+            
+                # 6) 直接反量化：按共享指数左移，再按保留的小数位右移，还原近似值
+                frac_bits_keep = target_mant_bits - 1  # 去掉前导1后的位数
+                sign_factor = torch.where(sign == 1, -1.0, 1.0)
+                exp_unbiased = exp_block.to(torch.int32) - 15  # FP16 bias = 15
+                scale = torch.pow(torch.tensor(2.0, device=weight_tensor_grouped.device), exp_unbiased.float() - float(frac_bits_keep))
+                dequantized = mant_rounded.to(weight_tensor_grouped.dtype) * scale * sign_factor.to(weight_tensor_grouped.dtype)
+
+                self.weight.data = dequantized.view(original_shape)
+                self.weight_bfp_mantissa = mant_rounded.view(original_shape).to(torch.int16)
+                self.weight_bfp_exponent = exp_block.view(-1).to(torch.int16)
+                self.scales = None
+                self.zeros = None
+                self.weight_fp4 = None
+                self.weight_fp6 = None
+                self.weight_fp8 = None
+                self.quantized.fill_(True)
+                return
             if self.weight_format == "fp4":
                 original_shape = self.weight.shape  # [out_features, in_features]
                 weight_tensor = self.weight.data
@@ -651,6 +728,9 @@ class QuantLinear(nn.Module):
     def forward(self, input):
         """前向传播"""
         if not self.quantized:
+            return F.linear(input, self.weight, self.bias)
+
+        if self.weight_format == "bfp":
             return F.linear(input, self.weight, self.bias)
 
         # FP4 前向直接解码为浮点做矩阵乘法（与整数量化路径分离）
@@ -901,7 +981,7 @@ class QuantLinear(nn.Module):
         return output
 
     @classmethod
-    def from_linear(cls, linear_layer, w_bit=4, w_group_size=128, symmetric=False, mode=0, weight_format: str = "int", approximate: bool = False):
+    def from_linear(cls, linear_layer, w_bit=4, w_group_size=128, symmetric=False, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0):
         """从现有的线性层创建量化线性层"""
         assert isinstance(linear_layer, nn.Linear), "Input layer must be nn.Linear"
         quant_linear = cls(
@@ -914,6 +994,7 @@ class QuantLinear(nn.Module):
             mode=mode,
             weight_format=weight_format,
             approximate=approximate,
+            quant_dim=quant_dim,
         )
         # 复制权重和偏置
         quant_linear.weight.data = linear_layer.weight.data.clone()
