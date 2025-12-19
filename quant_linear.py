@@ -374,12 +374,12 @@ class QuantLinear(nn.Module):
         """一种近似量化权重的方案（列分组，需转置权重，w_group_size>0）。"""
         with torch.no_grad():
             original_shape = self.weight.shape  # [out_features, in_features]
-            weight_t = self.weight.data.t()     # [in_features, out_features]
+            weight = self.weight.data
 
             if self.w_group_size <= 0:
                 raise ValueError("approximate 仅支持分组量化，w_group_size 必须 > 0")
-            assert weight_t.shape[-1] % self.w_group_size == 0
-            weight_grouped = weight_t.reshape(-1, self.w_group_size)
+            assert weight.shape[-1] % self.w_group_size == 0
+            weight_grouped = weight.reshape(-1, self.w_group_size)
 
             if self.weight_format == "fp4":
                 fp_max_value = (1.0 + (2**FP4_MANTISSA_BITS - 1) / (2**FP4_MANTISSA_BITS)) * (2.0 ** ((1 << FP4_EXP_BITS) - 1 - FP4_EXP_BIAS))
@@ -404,7 +404,7 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
-                decoded = _fp8_decode_aligned(codes, hi_align_start=0, hi_align_exp_field=15, tail_pad_bits=1, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype)
+                decoded = _fp8_decode_aligned(codes, hi_align_start=12, hi_align_exp_field=15, tail_pad_bits=1, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype)
             else:
                 raise NotImplementedError("approximate 目前仅支持 fp4/fp8")
 
@@ -412,10 +412,9 @@ class QuantLinear(nn.Module):
             self.zeros = None
 
             dequantized_grouped = decoded * scales
-            dequantized_t = dequantized_grouped.view(weight_t.shape)
-            dequantized = dequantized_t.t().contiguous()
+            dequantized = dequantized_grouped.view(weight.shape)
 
-            # 缓存码字（保持转置布局）
+            # 缓存码字
             self.weight_fp4 = codes if self.weight_format == "fp4" else None
             self.weight_fp6 = codes if self.weight_format == "fp6" else None
             self.weight_fp8 = codes if self.weight_format == "fp8" else None
