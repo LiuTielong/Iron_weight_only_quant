@@ -771,175 +771,28 @@ class QuantLinear(nn.Module):
         if not self.quantized:
             return F.linear(input, self.weight, self.bias)
 
-        if self.weight_format == "bfp":
-            return F.linear(input, self.weight, self.bias)
-
-        # FP4 前向直接解码为浮点做矩阵乘法（与整数量化路径分离）
-        if self.weight_format == "fp4":
-            if self.approximate:
-                if self.weight_fp4 is None or self.scales is None:
-                    dequantized_weight = self.weight
-                else:
-                    codes_grouped = self.weight_fp4.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                    decoded = _fp4_decode_aligned(codes_grouped, target_exp_field=2, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.dtype)
-                    dequantized_grouped = decoded * scales
-                    weight_t_shape = (self.weight.shape[1], self.weight.shape[0])
-                    dequantized_weight = dequantized_grouped.view(weight_t_shape).t()
-                return F.linear(input, dequantized_weight, self.bias)
+        # FP/BFP 权重在量化阶段已解码到 self.weight，直接使用
+        if self.weight_format in {"fp4", "fp6", "fp8", "bfp"}:
             original_input_shape = input.shape
-            if self.weight_fp4 is None or self.scales is None:
-                # 如果意外缺少码字或scale，退化为使用当前权重
-                print("缺少scale!")
-                dequantized_weight = self.weight
-            else:
-                if self.w_group_size > 0:
-                    original_shape = self.weight.shape
-                    codes_grouped = self.weight_fp4.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(codes_grouped).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        zeros = self.zeros.reshape(-1, 1).to(self.weight.dtype)
-                        dequantized_weight = dequantized_weight + zeros
-                    dequantized_weight = dequantized_weight.view(original_shape)
-                elif self.w_group_size == -1:
-                    scales = self.scales.view(1, 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(self.weight_fp4).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        dequantized_weight = dequantized_weight + self.zeros.view(1, 1).to(self.weight.dtype)
-                elif self.w_group_size == -2:
-                    original_shape = self.weight.shape
-                    codes_grouped = self.weight_fp4.reshape(original_shape[0], -1)
-                    scales = self.scales.reshape(original_shape[0], 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(codes_grouped).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        zeros = self.zeros.reshape(original_shape[0], 1).to(self.weight.dtype)
-                        dequantized_weight = dequantized_weight + zeros
-                    dequantized_weight = dequantized_weight.view(original_shape)
-                else:
-                    raise ValueError("Invalid w_group_size")
-
-            # FIGLUT-I 的整数累加不适用于 FP4，这里统一走标准线性层
-            output = F.linear(input, dequantized_weight, self.bias)
-
-            # 恢复输入的原始形状
+            out = F.linear(input, self.weight, self.bias)
             if input.dim() > 2:
-                output = output.reshape(original_input_shape[:-1] + (self.out_features,))
-            return output
+                out = out.reshape(original_input_shape[:-1] + (self.out_features,))
+            return out
 
-        # FP6 前向
-        if self.weight_format == "fp6":
-            if self.approximate:
-                if self.weight_fp6 is None or self.scales is None:
-                    dequantized_weight = self.weight
-                else:
-                    codes_grouped = self.weight_fp6.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                    decoded = _fp6e3m2_decode_aligned(codes_grouped, hi_align_start=4, hi_align_exp_field=7, tail_pad_bits=2, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype)
-                    dequantized_grouped = decoded * scales
-                    weight_t_shape = (self.weight.shape[1], self.weight.shape[0])
-                    dequantized_weight = dequantized_grouped.view(weight_t_shape).t()
-                return F.linear(input, dequantized_weight, self.bias)
-            original_input_shape = input.shape
-            if self.weight_fp6 is None or self.scales is None:
-                dequantized_weight = self.weight
-            else:
-                if self.w_group_size > 0:
-                    original_shape = self.weight.shape
-                    codes_grouped = self.weight_fp6.reshape(-1, self.w_group_size)
-                    scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        zeros = self.zeros.reshape(-1, 1).to(self.weight.dtype)
-                        dequantized_weight = dequantized_weight + zeros
-                    dequantized_weight = dequantized_weight.view(original_shape)
-                elif self.w_group_size == -1:
-                    scales = self.scales.view(1, 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(self.weight_fp6, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        dequantized_weight = dequantized_weight + self.zeros.view(1, 1).to(self.weight.dtype)
-                elif self.w_group_size == -2:
-                    original_shape = self.weight.shape
-                    codes_grouped = self.weight_fp6.reshape(original_shape[0], -1)
-                    scales = self.scales.reshape(original_shape[0], 1).to(self.weight.dtype)
-                    dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.dtype) * scales
-                    if self.zeros is not None:
-                        zeros = self.zeros.reshape(original_shape[0], 1).to(self.weight.dtype)
-                        dequantized_weight = dequantized_weight + zeros
-                    dequantized_weight = dequantized_weight.view(original_shape)
-                else:
-                    raise ValueError("Invalid w_group_size")
-
-            output = F.linear(input, dequantized_weight, self.bias)
-            if input.dim() > 2:
-                output = output.reshape(original_input_shape[:-1] + (self.out_features,))
-            return output
-
-        # FP8 前向
-        if self.weight_format == "fp8":
-            if self.approximate:
-                if self.weight_fp8 is None or self.scales is None:
-                    dequantized_weight = self.weight
-                else:
-                    # codes_grouped = self.weight_fp8.reshape(-1, self.w_group_size)
-                    # scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                    # decoded = _fp8_decode_aligned(codes_grouped, hi_align_start=12, hi_align_exp_field=15, tail_pad_bits=2, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.dtype)
-                    # dequantized_grouped = decoded * scales
-                    # weight_t_shape = (self.weight.shape[1], self.weight.shape[0])
-                    # dequantized_weight = dequantized_grouped.view(weight_t_shape).t()
-                    dequantized_weight = self.weight.data
-                return F.linear(input, dequantized_weight, self.bias)
-            original_input_shape = input.shape
-            if self.weight_fp8 is None or self.scales is None:
-                dequantized_weight = self.weight
-            else:
-                dequantized_weight = self.weight.data
-                # if self.w_group_size > 0:
-                #     original_shape = self.weight.shape
-                #     codes_grouped = self.weight_fp8.reshape(-1, self.w_group_size)
-                #     scales = self.scales.reshape(-1, 1).to(self.weight.dtype)
-                #     dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.dtype) * scales
-                #     if self.zeros is not None:
-                #         zeros = self.zeros.reshape(-1, 1).to(self.weight.dtype)
-                #         dequantized_weight = dequantized_weight + zeros
-                #     dequantized_weight = dequantized_weight.view(original_shape)
-                # elif self.w_group_size == -1:
-                #     scales = self.scales.view(1, 1).to(self.weight.dtype)
-                #     dequantized_weight = _fp4_to_float(self.weight_fp8, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.dtype) * scales
-                #     if self.zeros is not None:
-                #         dequantized_weight = dequantized_weight + self.zeros.view(1, 1).to(self.weight.dtype)
-                # elif self.w_group_size == -2:
-                #     original_shape = self.weight.shape
-                #     codes_grouped = self.weight_fp8.reshape(original_shape[0], -1)
-                #     scales = self.scales.reshape(original_shape[0], 1).to(self.weight.dtype)
-                #     dequantized_weight = _fp4_to_float(codes_grouped, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.dtype) * scales
-                #     if self.zeros is not None:
-                #         zeros = self.zeros.reshape(original_shape[0], 1).to(self.weight.dtype)
-                #         dequantized_weight = dequantized_weight + zeros
-                #     dequantized_weight = dequantized_weight.view(original_shape)
-                # else:
-                #     raise ValueError("Invalid w_group_size")
-
-            output = F.linear(input, dequantized_weight, self.bias)
-            if input.dim() > 2:
-                output = output.reshape(original_input_shape[:-1] + (self.out_features,))
-            return output
-        
         # 确保输入是2D的 (batch_size, in_features)
         original_input_shape = input.shape
         if input.dim() > 2:
             input = input.reshape(-1, input.shape[-1])
 
-        # 根据mode选择前向计算方式
+        # 根据mode选择前向计算方式（整数量化路径）
         if self.mode == 0 or self.mode == 1:
-            # 1. 准备权重
             weight_int = self.weight        
             if self.w_group_size > 0: 
                 # per-group 量化， 需要按组处理
                 original_shape = self.weight.shape
                 weight_int = self.weight.reshape(-1, self.w_group_size)
 
-            # 2. 反量化，适用于所有粒度的情况
+            # 反量化，适用于所有粒度的情况
             if self.zeros is not None:
                 dequantized_weight = (weight_int - self.zeros) * self.scales
             else:
@@ -967,47 +820,23 @@ class QuantLinear(nn.Module):
             scales_w = self.scales.reshape(self.out_features, num_groups)  # shape: [out_features, num_groups]
 
             # 4. 分组整数矩阵乘法
-            # 4.1 Reshape A and W以进行分组计算
-            # A: [m, n] -> [m, g, s] (m=batch_size, g=num_groups, s=group_size)
             activations_grouped = activations_int.reshape(-1, num_groups, self.w_group_size)
-            # W: [o, n] -> [o, g, s] (o=out_features, g=num_groups, s=group_size)
             weights_grouped = weights_int.reshape(self.out_features, num_groups, self.w_group_size)
-
-            # 4.2 使用einsum计算整数部分和
-            # m: batch dim, o: output feature dim, g: group dim, s: group size dim
-            # 我们对每个 group 内的元素 (s) 进行点积
-            # 得到每个(batch, output_feature, group)的部分和
-            # 'mgs,ogs->mog' 表示:
-            #   - 对 m, g, s 和 o, g, s 进行操作
-            #   - s 是求和的维度 (点积)
-            #   - 结果的维度是 m, o, g
             activations_grouped_fp64 = activations_grouped.to(torch.float64)  # int64不被GPU支持，只能转换成FP64了
             weights_grouped_fp64 = weights_grouped.to(torch.float64)
             partial_sums_acc = torch.einsum('mgs,ogs->mog', activations_grouped_fp64, weights_grouped_fp64)
 
             # 5. 缩放部分和并用FP32累加
-            # 5.1 准备用于广播的scales
-            # scales_w: [o, g] -> [1, o, g]
             scales_w_broadcastable = scales_w.unsqueeze(0).to(torch.float32)
-
-            # 5.2 将整数部分和乘以权重 scales，转换为 FP32
-            # partial_sums_acc: [m, o, g]
-            # scales_w_broadcastable: [1, o, g]
-            # 结果 partial_sums_fp: [m, o, g]
             partial_sums_fp = partial_sums_acc.to(torch.float32) * scales_w_broadcastable
             partial_sums_fp /= 2**(MANTISSA_BITS-1)
-
-            # 5.3 累加FP32部分和（在group维度上求和）
-            # 模拟 FP32 累加器
             accumulated_fp = torch.sum(partial_sums_fp, dim=2) # shape: [m, o]
 
             # 6. 应用激活值的scale并添加偏置
-            # 6.1 row_exponents: [m] -> [m, 1]
             row_exponents_fp32 = row_exponents.to(torch.float32)
             act_scales = torch.pow(2.0, row_exponents_fp32).unsqueeze(-1)
             output_rescaled = accumulated_fp * act_scales
 
-            # 6.2 添加偏置并保证输出dtype与输入一致
             if self.bias is not None:
                 output_rescaled = output_rescaled + self.bias.to(output_rescaled.dtype)
             output = output_rescaled.to(input.dtype)
