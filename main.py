@@ -21,6 +21,7 @@ sys.path.append(".")
 sys.path.append("./gptq")
 from gptq.datautils import get_loaders
 from quant_wrapper import quantize_model
+from quant_linear import configure_fp_formats
 from utils import build_model_and_enc
 
 # lm-eval imports（仅在 lm_eval 模式下使用）
@@ -109,6 +110,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--quant_dim", type=int, default=1, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
     p.add_argument("--mode", type=int, default=0, choices=[0, 1, 2], help="0: GPU, 1: FIGLUT-F, 2: FIGLUT-I")
     p.add_argument("--approximate", action="store_true", help="近似量化")
+    # 可配置 FP4/FP6/FP8 结构
+    p.add_argument("--fp4_exp_bits", type=int, default=2, help="FP4 指数字段位数")
+    p.add_argument("--fp4_mantissa_bits", type=int, default=1, help="FP4 尾数字段位数（不含前导1）")
+    p.add_argument("--fp6_exp_bits", type=int, default=3, help="FP6 指数字段位数")
+    p.add_argument("--fp6_mantissa_bits", type=int, default=2, help="FP6 尾数字段位数（不含前导1）")
+    p.add_argument("--fp8_exp_bits", type=int, default=4, help="FP8 指数字段位数")
+    p.add_argument("--fp8_mantissa_bits", type=int, default=3, help="FP8 尾数字段位数（不含前导1）")
+    # 近似 FP8 解码参数
+    p.add_argument("--fp8_hi_align_start", type=int, default=12, help="FP8 近似解码：高指数对齐起始指数字段值")
+    p.add_argument("--fp8_hi_align_exp_field", type=int, default=15, help="FP8 近似解码：高指数对齐到的指数字段值")
+    p.add_argument("--fp8_tail_pad_bits", type=int, default=1, help="FP8 近似解码：尾数右移前补的低位0数量")
 
     # GPTQ 相关
     p.add_argument("--gptq", action="store_true", help="是否使用 GPTQ")
@@ -170,6 +182,16 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
 
 def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_dataset: Optional[str] = None) -> Tuple[torch.nn.Module, object]:
     """Load model/tokenizer, run quantization (on CPU) if needed, and move to device."""
+    # 配置 FP4/6/8 参数（影响 quant_linear 内部常量）
+    configure_fp_formats(
+        fp4_exp_bits=args.fp4_exp_bits,
+        fp4_mantissa_bits=args.fp4_mantissa_bits,
+        fp6_exp_bits=args.fp6_exp_bits,
+        fp6_mantissa_bits=args.fp6_mantissa_bits,
+        fp8_exp_bits=args.fp8_exp_bits,
+        fp8_mantissa_bits=args.fp8_mantissa_bits,
+    )
+
     model, tokenizer = build_model_and_enc(
         args.model_path,
         args.use_flash_attn,
@@ -199,6 +221,18 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
         model = quantize_model(model, qargs)
         model = model.to(device)
         torch.cuda.empty_cache()
+        # 可视化
+            # if args.w_format == "fp4" and 4 in args.w_bits:
+            #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
+            #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
+            # if args.w_format == "fp6" and 6 in args.w_bits:
+            #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
+            #     plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
+            #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
+            # if args.w_format == "fp8" and 8 in args.w_bits:
+            #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
+            #     plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
+            #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
     else:
         model = model.to(device)
 

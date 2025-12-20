@@ -36,5 +36,10 @@ CUDA_VISIBLE_DEVICES=1 python main.py --model_path /home/data/meta-llama/opt/6.7
 CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/eval_quant_lm_eval.py   --model_path /home/data/meta-llama/opt/6.7b   --tasks boolq    --w_bit 8 --w_group_size 128 \
 --w_format fp8 --approximate   --batch_size 1 --device cuda   --offline   --hf_cache /home/liutielong/.cache/huggingface --quant_dim 0
 
-# bfp量化
-CUDA_VISIBLE_DEVICES=0 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format bfp --w_bits 8 --w_group_size 128 --datasets wikitext --w_symmetric  
+
+CUDA_VISIBLE_DEVICES=0 python main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp8 --w_bits 8 --w_group_size 128 --datasets wikitext --w_symmetric --approximate --eval_mode ppl
+
+
+
+
+CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp8 --w_bits 8 --w_group_size 128 --tasks boolq --w_symmetric --approximate

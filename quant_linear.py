@@ -16,6 +16,35 @@ FP8_MANTISSA_BITS = 3
 FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
 
 
+def configure_fp_formats(
+    fp4_exp_bits: int = FP4_EXP_BITS,
+    fp4_mantissa_bits: int = FP4_MANTISSA_BITS,
+    fp6_exp_bits: int = FP6_EXP_BITS,
+    fp6_mantissa_bits: int = FP6_MANTISSA_BITS,
+    fp8_exp_bits: int = FP8_EXP_BITS,
+    fp8_mantissa_bits: int = FP8_MANTISSA_BITS,
+):
+    """
+    更新 FP4/FP6/FP8 的指数字段与尾数字段位宽，偏置随指数位宽自动计算。
+    便于通过外部 args 进行配置，不改变默认值。
+    """
+    global FP4_EXP_BITS, FP4_MANTISSA_BITS, FP4_EXP_BIAS
+    global FP6_EXP_BITS, FP6_MANTISSA_BITS, FP6_EXP_BIAS
+    global FP8_EXP_BITS, FP8_MANTISSA_BITS, FP8_EXP_BIAS
+
+    FP4_EXP_BITS = int(fp4_exp_bits)
+    FP4_MANTISSA_BITS = int(fp4_mantissa_bits)
+    FP4_EXP_BIAS = 2 ** (FP4_EXP_BITS - 1) - 1
+
+    FP6_EXP_BITS = int(fp6_exp_bits)
+    FP6_MANTISSA_BITS = int(fp6_mantissa_bits)
+    FP6_EXP_BIAS = 2 ** (FP6_EXP_BITS - 1) - 1
+
+    FP8_EXP_BITS = int(fp8_exp_bits)
+    FP8_MANTISSA_BITS = int(fp8_mantissa_bits)
+    FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
+
+
 def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
     将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
@@ -321,7 +350,7 @@ class QuantLinear(nn.Module):
     """
     自定义量化线性层, 支持量化后的权重和FP16激活值之间的矩阵乘法
     """
-    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0):
+    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0, fp8_hi_align_start: int = 12, fp8_hi_align_exp_field: int = 15, fp8_tail_pad_bits: int = 1):
         """
         Args:
             in_features: 输入特征数
@@ -344,6 +373,10 @@ class QuantLinear(nn.Module):
         raw_format = weight_format.lower()
         self.weight_format = "bfp" if raw_format.startswith("bfp") else raw_format
         self.approximate = approximate
+        # 近似 FP8 对齐参数（可由外部注入）
+        self.fp8_hi_align_start = fp8_hi_align_start
+        self.fp8_hi_align_exp_field = fp8_hi_align_exp_field
+        self.fp8_tail_pad_bits = fp8_tail_pad_bits
         if self.weight_format not in {"int", "fp4", "fp6", "fp8", "bfp"}:
             raise ValueError(f"Unsupported weight_format: {weight_format}")
 
@@ -417,7 +450,15 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
-                decoded = _fp8_decode_aligned(codes, hi_align_start=12, hi_align_exp_field=15, tail_pad_bits=0, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype)
+                decoded = _fp8_decode_aligned(
+                    codes,
+                    hi_align_start=self.fp8_hi_align_start,
+                    hi_align_exp_field=self.fp8_hi_align_exp_field,
+                    tail_pad_bits=self.fp8_tail_pad_bits,
+                    exp_bits=FP8_EXP_BITS,
+                    mant_bits=FP8_MANTISSA_BITS,
+                    exp_bias=FP8_EXP_BIAS,
+                ).to(self.weight.data.dtype)
             else:
                 raise NotImplementedError("approximate 目前仅支持 fp4/fp8")
 
@@ -981,7 +1022,20 @@ class QuantLinear(nn.Module):
         return output
 
     @classmethod
-    def from_linear(cls, linear_layer, w_bit=4, w_group_size=128, symmetric=False, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0):
+    def from_linear(
+        cls,
+        linear_layer,
+        w_bit=4,
+        w_group_size=128,
+        symmetric=False,
+        mode=0,
+        weight_format: str = "int",
+        approximate: bool = False,
+        quant_dim: int = 0,
+        fp8_hi_align_start: int = 12,
+        fp8_hi_align_exp_field: int = 15,
+        fp8_tail_pad_bits: int = 1,
+    ):
         """从现有的线性层创建量化线性层"""
         assert isinstance(linear_layer, nn.Linear), "Input layer must be nn.Linear"
         quant_linear = cls(
@@ -995,6 +1049,9 @@ class QuantLinear(nn.Module):
             weight_format=weight_format,
             approximate=approximate,
             quant_dim=quant_dim,
+            fp8_hi_align_start=fp8_hi_align_start,
+            fp8_hi_align_exp_field=fp8_hi_align_exp_field,
+            fp8_tail_pad_bits=fp8_tail_pad_bits,
         )
         # 复制权重和偏置
         quant_linear.weight.data = linear_layer.weight.data.clone()
