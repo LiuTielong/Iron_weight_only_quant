@@ -23,6 +23,7 @@ from gptq.datautils import get_loaders
 from quant_wrapper import quantize_model
 from quant_linear import configure_fp_formats
 from utils import build_model_and_enc
+from visualize_utils import plot_random_fp8_exponent_dists, plot_fp8_exponent_heatmaps, count_fp8_exponent_outliers
 
 # lm-eval imports（仅在 lm_eval 模式下使用）
 from lm_eval import evaluator, tasks
@@ -167,6 +168,9 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
             self.w_format = args.w_format
             self.approximate = args.approximate
             self.quant_dim = args.quant_dim
+            self.fp8_hi_align_start = args.fp8_hi_align_start
+            self.fp8_hi_align_exp_field = args.fp8_hi_align_exp_field
+            self.fp8_tail_pad_bits = args.fp8_tail_pad_bits
             self.a_bit = 16
             self.a_group_size = 128
             self.kv_bit = 16
@@ -219,20 +223,22 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
             )
             qargs.dataloader = dataloader
         model = quantize_model(model, qargs)
+        # 可视化
+        # if args.w_format == "fp4" and 4 in args.w_bits:
+        #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp4_dists.png")
+        #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp4_exponent_dists.png")
+        # if args.w_format == "fp6" and 6 in args.w_bits:
+        #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp6_dists.png")
+        #     plot_random_fp6_uniform_bins(model, k=10, seed=0, num_bins=16, save_path="./Iron_weight_only_quant/results/fp6_uniform_bins.png")
+        #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp6_exponent_dists.png")
+        # if args.w_format == "fp8" and 8 in args.w_bits:
+        #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp8_dists.png")
+        #     plot_random_fp8_uniform_bins(model, k=10, seed=0, num_bins=32, save_path="./Iron_weight_only_quant/results/fp8_uniform_bins.png")
+        #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp8_exponent_dists.png")
+        #     plot_fp8_exponent_heatmaps(model, num_layers=4, block_size=64, seed=0, save_path="./Iron_weight_only_quant/results/fp8_exponent_heatmaps.png")
+        #     count_fp8_exponent_outliers(model, group_size=4, threshold=11, exp_bits=args.fp8_exp_bits, mant_bits=args.fp8_mantissa_bits, k=10, seed=0)
         model = model.to(device)
         torch.cuda.empty_cache()
-        # 可视化
-            # if args.w_format == "fp4" and 4 in args.w_bits:
-            #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./results/fp4_dists.png")
-            #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./results/fp4_exponent_dists.png")
-            # if args.w_format == "fp6" and 6 in args.w_bits:
-            #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./results/fp6_dists.png")
-            #     plot_random_fp6_uniform_bins(model, k=10, seed=42, num_bins=16, save_path="./results/fp6_uniform_bins.png")
-            #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./results/fp6_exponent_dists.png")
-            # if args.w_format == "fp8" and 8 in args.w_bits:
-            #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./results/fp8_dists.png")
-            #     plot_random_fp8_uniform_bins(model, k=10, seed=42, num_bins=32, save_path="./results/fp8_uniform_bins.png")
-            #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./results/fp8_exponent_dists.png")
     else:
         model = model.to(device)
 
