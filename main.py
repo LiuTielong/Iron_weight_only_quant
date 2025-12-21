@@ -16,6 +16,14 @@ from typing import Optional, Tuple
 
 import torch
 
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+for env_key in ("HF_ENDPOINT", "HF_MIRROR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+    os.environ.pop(env_key, None)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import sys
 sys.path.append(".")
 sys.path.append("./gptq")
@@ -111,6 +119,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--quant_dim", type=int, default=1, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
     p.add_argument("--mode", type=int, default=0, choices=[0, 1, 2], help="0: GPU, 1: FIGLUT-F, 2: FIGLUT-I")
     p.add_argument("--approximate", action="store_true", help="近似量化")
+    p.add_argument("--double_approximate", action="store_true", help="两层近似量化")
     # 可配置 FP4/FP6/FP8 结构
     p.add_argument("--fp4_exp_bits", type=int, default=2, help="FP4 指数字段位数")
     p.add_argument("--fp4_mantissa_bits", type=int, default=1, help="FP4 尾数字段位数（不含前导1）")
@@ -167,6 +176,7 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
             self.w_symmetric = args.w_symmetric
             self.w_format = args.w_format
             self.approximate = args.approximate
+            self.double_approximate = args.double_approximate
             self.quant_dim = args.quant_dim
             self.fp8_hi_align_start = args.fp8_hi_align_start
             self.fp8_hi_align_exp_field = args.fp8_hi_align_exp_field

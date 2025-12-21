@@ -29,6 +29,7 @@
                 "--datasets", "wikitext",
                 "--w_format", "fp8",
                 "--approximate",
+                "--double_approximate",
             ]
         }
     ]
