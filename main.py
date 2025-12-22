@@ -127,10 +127,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp6_mantissa_bits", type=int, default=2, help="FP6 尾数字段位数（不含前导1）")
     p.add_argument("--fp8_exp_bits", type=int, default=4, help="FP8 指数字段位数")
     p.add_argument("--fp8_mantissa_bits", type=int, default=3, help="FP8 尾数字段位数（不含前导1）")
-    # 近似 FP8 解码参数
+    # 近似 FP6/FP8 解码参数
+    p.add_argument("--fp6_hi_align_start", type=int, default=4, help="FP6 近似解码：高指数对齐起始指数字段值")
+    p.add_argument("--fp6_hi_align_exp_field", type=int, default=7, help="FP6 近似解码：高指数对齐到的指数字段值")
+    p.add_argument("--fp6_tail_pad_bits", type=int, default=2, help="FP6 近似解码：尾数右移前补的低位0数量（可为负表示右移截断）")
     p.add_argument("--fp8_hi_align_start", type=int, default=12, help="FP8 近似解码：高指数对齐起始指数字段值")
     p.add_argument("--fp8_hi_align_exp_field", type=int, default=15, help="FP8 近似解码：高指数对齐到的指数字段值")
-    p.add_argument("--fp8_tail_pad_bits", type=int, default=1, help="FP8 近似解码：尾数右移前补的低位0数量")
+    p.add_argument("--fp8_tail_pad_bits", type=int, default=1, help="FP8 近似解码：尾数右移前补的低位0数量（可为负表示右移截断）")
 
     # GPTQ 相关
     p.add_argument("--gptq", action="store_true", help="是否使用 GPTQ")
@@ -181,6 +184,9 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
             self.fp8_hi_align_start = args.fp8_hi_align_start
             self.fp8_hi_align_exp_field = args.fp8_hi_align_exp_field
             self.fp8_tail_pad_bits = args.fp8_tail_pad_bits
+            self.fp6_hi_align_start = args.fp6_hi_align_start
+            self.fp6_hi_align_exp_field = args.fp6_hi_align_exp_field
+            self.fp6_tail_pad_bits = args.fp6_tail_pad_bits
             self.a_bit = 16
             self.a_group_size = 128
             self.kv_bit = 16
