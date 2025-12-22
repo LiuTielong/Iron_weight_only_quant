@@ -236,7 +236,8 @@ def _fp8_decode_aligned_double_approx(
     sign_groups = flat_sign.view(-1, 4)
     zero_groups = flat_zero.view(-1, 4)
 
-    outlier_mask = exp_groups < hi_align_start
+    # 将低于 hi_align_start 或高于 hi_align_exp_field 的指数都视为 outlier
+    outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field)
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
     # 统计 outlier>=2 组的 max-min 差距分布
@@ -314,7 +315,7 @@ def _fp6e3m2_decode_aligned(
     value_normal = mant_full.float() / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device), exp_unbiased)
 
     # 高指数对齐分支
-    hi_mask = exp_field >= hi_align_start
+    hi_mask = (exp_field >= hi_align_start) & (exp_field <= hi_align_exp_field)
     shift = torch.clamp(hi_align_exp_field - exp_field, min=0)
     mant_aligned = torch.bitwise_right_shift(mant_padded, shift)
     hi_unbiased = hi_align_exp_field - exp_bias
@@ -364,10 +365,17 @@ def _fp6e3m2_decode_aligned_double_approx(
     sign_groups = flat_sign.view(-1, 4)
     zero_groups = flat_zero.view(-1, 4)
 
-    outlier_mask = exp_groups < hi_align_start
+    outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field) 
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
-    target_exp = torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max)
+    # target_exp = torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max)
+    max_exp_val = (1 << exp_bits) - 1
+    has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
+    target_exp = torch.where(
+        has_max_outlier,
+        torch.full_like(group_max, max_exp_val),
+        torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max),
+    )
 
     shift = torch.clamp(target_exp - exp_groups, min=0)
     mant_aligned = torch.bitwise_right_shift(mant_groups, shift)
@@ -594,7 +602,7 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
-                if FP6_EXP_BIAS == 3:
+                if FP6_EXP_BITS == 3:
                     if self.double_approximate:
                         decoded = _fp6e3m2_decode_aligned_double_approx(
                             codes, 
@@ -615,7 +623,7 @@ class QuantLinear(nn.Module):
                             mant_bits=FP6_MANTISSA_BITS, 
                             exp_bias=FP6_EXP_BIAS
                         ).to(self.weight.data.dtype)
-                elif FP6_EXP_BIAS == 2:
+                elif FP6_EXP_BITS == 2:
                     decoded = _fp4_to_float(codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype)
             elif self.weight_format == "fp8":
                 fp_max_value = (1.0 + (2**FP8_MANTISSA_BITS - 1) / (2**FP8_MANTISSA_BITS)) * (2.0 ** ((1 << FP8_EXP_BITS) - 1 - FP8_EXP_BIAS))
