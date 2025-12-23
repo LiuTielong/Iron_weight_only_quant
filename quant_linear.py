@@ -489,6 +489,47 @@ def _fp6e2m3_decode_aligned_double_approx(
     return value.view(code.shape).t()
 
 
+def _fp4e1m2_decode_aligned(
+    code: torch.Tensor,
+    hi_align_start: int = 1,
+    hi_align_exp_field: int = 1,
+    tail_pad_bits: int = 0,
+    exp_bits: int = 1,
+    mant_bits: int = 2,
+    exp_bias: int = 0,
+) -> torch.Tensor:
+    """
+    FP4 (E1M2) 近似解码：仅对 exp_field >= hi_align_start 且 <= hi_align_exp_field 的值对齐到 hi_align_exp_field。
+    支持 tail_pad_bits 为负（右移截断）。
+    """
+    code = code.to(torch.uint8)
+    zero_mask = code == 0
+    sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
+    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).int()
+    exp_for_align = torch.where(exp_field == 0, torch.ones_like(exp_field), exp_field)  # 用于对齐的指数，需要提前处理非正规数指数为1.
+    mant_field = (code & ((1 << mant_bits) - 1)).int()
+
+    leading = torch.where(exp_field == 0, torch.zeros_like(exp_field), torch.ones_like(exp_field))
+    mant_full = (leading << mant_bits) | mant_field
+    if tail_pad_bits >= 0:
+        mant_padded = mant_full << tail_pad_bits
+    else:
+        mant_padded = torch.bitwise_right_shift(mant_full, abs(tail_pad_bits))
+
+    exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias).float()
+    value_normal = mant_full.float() / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device), exp_unbiased)
+
+    hi_mask = (exp_for_align >= hi_align_start) & (exp_for_align <= hi_align_exp_field)
+    shift = torch.clamp(hi_align_exp_field - exp_for_align, min=0)
+    mant_aligned = torch.bitwise_right_shift(mant_padded, shift)
+    hi_unbiased = hi_align_exp_field - exp_bias
+    value_hi = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * (2.0 ** float(hi_unbiased))
+
+    value = torch.where(hi_mask, value_hi, value_normal)
+    value = torch.where(sign == 1, -value, value)
+    return torch.where(zero_mask, torch.zeros_like(value), value)
+
+
 def _count_fp4_values(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS):
     """
     统计 FP4 码字解码后的 15/16 个可表示值各自出现的次数。
@@ -610,7 +651,7 @@ class QuantLinear(nn.Module):
     """
     自定义量化线性层, 支持量化后的权重和FP16激活值之间的矩阵乘法
     """
-    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0, fp8_hi_align_start: int = 12, fp8_hi_align_exp_field: int = 15, fp8_tail_pad_bits: int = 1, double_approximate: bool = False, fp6_hi_align_start: int = 4, fp6_hi_align_exp_field: int = 7, fp6_tail_pad_bits: int = 2):
+    def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0, fp8_hi_align_start: int = 12, fp8_hi_align_exp_field: int = 15, fp8_tail_pad_bits: int = 1, double_approximate: bool = False, fp6_hi_align_start: int = 4, fp6_hi_align_exp_field: int = 7, fp6_tail_pad_bits: int = 2, fp4_hi_align_start: int = 1, fp4_hi_align_exp_field: int = 1, fp4_tail_pad_bits: int = 0):
         """
         Args:
             in_features: 输入特征数
@@ -641,6 +682,9 @@ class QuantLinear(nn.Module):
         self.fp6_hi_align_start = fp6_hi_align_start
         self.fp6_hi_align_exp_field = fp6_hi_align_exp_field
         self.fp6_tail_pad_bits = fp6_tail_pad_bits
+        self.fp4_hi_align_start = fp4_hi_align_start
+        self.fp4_hi_align_exp_field = fp4_hi_align_exp_field
+        self.fp4_tail_pad_bits = fp4_tail_pad_bits
         if self.weight_format not in {"int", "fp4", "fp6", "fp8", "bfp"}:
             raise ValueError(f"Unsupported weight_format: {weight_format}")
 
@@ -696,7 +740,7 @@ class QuantLinear(nn.Module):
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
-                codes = _float_to_fp4(normalized)
+                codes = _float_to_fp4(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
                 if FP4_EXP_BITS == 1:
                     decoded = _fp4e1m2_decode_aligned(
                         codes, 
@@ -706,8 +750,9 @@ class QuantLinear(nn.Module):
                         exp_bits=FP4_EXP_BITS, 
                         mant_bits=FP4_MANTISSA_BITS,
                         exp_bias=FP4_EXP_BIAS
-                    )
-                # decoded = _fp4_decode_aligned(codes, target_exp_field=2, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype)
+                    ).to(self.weight.data.dtype)
+                else:
+                    decoded = _fp4_decode_aligned(codes, target_exp_field=2, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype)
             elif self.weight_format == "fp6":
                 fp_max_value = (1.0 + (2**FP6_MANTISSA_BITS - 1) / (2**FP6_MANTISSA_BITS)) * (2.0 ** ((1 << FP6_EXP_BITS) - 1 - FP6_EXP_BIAS))
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
@@ -905,7 +950,7 @@ class QuantLinear(nn.Module):
                     zeros = mid_val
                     normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp4_max_value, max=fp4_max_value)
 
-                fp4_codes = _float_to_fp4(normalized)
+                fp4_codes = _float_to_fp4(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
 
                 # 保存 scale 形状
                 if self.w_group_size == -1:
@@ -922,7 +967,7 @@ class QuantLinear(nn.Module):
                 self.weight_fp4 = fp4_codes.view(original_shape)
                 self.weight_fp6 = None
                 self.weight_fp8 = None
-                dequantized = _fp4_to_float(fp4_codes).to(self.weight.data.dtype) * scales
+                dequantized = _fp4_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)
@@ -1192,6 +1237,9 @@ class QuantLinear(nn.Module):
         fp6_hi_align_start: int = 4,
         fp6_hi_align_exp_field: int = 7,
         fp6_tail_pad_bits: int = 2,
+        fp4_hi_align_start: int = 1,
+        fp4_hi_align_exp_field: int = 1,
+        fp4_tail_pad_bits: int = 0,
     ):
         """从现有的线性层创建量化线性层"""
         assert isinstance(linear_layer, nn.Linear), "Input layer must be nn.Linear"
@@ -1213,6 +1261,9 @@ class QuantLinear(nn.Module):
             fp6_hi_align_start=fp6_hi_align_start,
             fp6_hi_align_exp_field=fp6_hi_align_exp_field,
             fp6_tail_pad_bits=fp6_tail_pad_bits,
+            fp4_hi_align_start=fp4_hi_align_start,
+            fp4_hi_align_exp_field=fp4_hi_align_exp_field,
+            fp4_tail_pad_bits=fp4_tail_pad_bits,
         )
         # 复制权重和偏置
         quant_linear.weight.data = linear_layer.weight.data.clone()

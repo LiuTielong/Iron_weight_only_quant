@@ -128,6 +128,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp8_exp_bits", type=int, default=4, help="FP8 指数字段位数")
     p.add_argument("--fp8_mantissa_bits", type=int, default=3, help="FP8 尾数字段位数（不含前导1）")
     # 近似 FP6/FP8 解码参数
+    p.add_argument("--fp4_hi_align_start", type=int, default=1, help="FP4 近似解码：高指数对齐起始指数字段值(E1M2)")
+    p.add_argument("--fp4_hi_align_exp_field", type=int, default=1, help="FP4 近似解码：高指数对齐到的指数字段值(E1M2)")
+    p.add_argument("--fp4_tail_pad_bits", type=int, default=0, help="FP4 近似解码：尾数右移前补的低位0数量（可为负表示右移截断）")
     p.add_argument("--fp6_hi_align_start", type=int, default=4, help="FP6 近似解码：高指数对齐起始指数字段值")
     p.add_argument("--fp6_hi_align_exp_field", type=int, default=7, help="FP6 近似解码：高指数对齐到的指数字段值")
     p.add_argument("--fp6_tail_pad_bits", type=int, default=2, help="FP6 近似解码：尾数右移前补的低位0数量（可为负表示右移截断）")
@@ -181,6 +184,9 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
             self.approximate = args.approximate
             self.double_approximate = args.double_approximate
             self.quant_dim = args.quant_dim
+            self.fp4_hi_align_start = args.fp4_hi_align_start
+            self.fp4_hi_align_exp_field = args.fp4_hi_align_exp_field
+            self.fp4_tail_pad_bits = args.fp4_tail_pad_bits
             self.fp8_hi_align_start = args.fp8_hi_align_start
             self.fp8_hi_align_exp_field = args.fp8_hi_align_exp_field
             self.fp8_tail_pad_bits = args.fp8_tail_pad_bits

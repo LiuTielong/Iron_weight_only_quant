@@ -67,6 +67,10 @@ def quantize_model(model, args, quant_mix_gate=False):
                         fp6_hi_align_start=getattr(args, "fp6_hi_align_start", 4),
                         fp6_hi_align_exp_field=getattr(args, "fp6_hi_align_exp_field", 7),
                         fp6_tail_pad_bits=getattr(args, "fp6_tail_pad_bits", 2),
+                  
+                        fp4_hi_align_start=getattr(args, "fp4_hi_align_start", 1),
+                        fp4_hi_align_exp_field=getattr(args, "fp4_hi_align_exp_field", 1),
+                        fp4_tail_pad_bits=getattr(args, "fp4_tail_pad_bits", 0),
                     )
                     # 替换
                     parent_module = model
