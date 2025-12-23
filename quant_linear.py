@@ -326,6 +326,46 @@ def _fp6e3m2_decode_aligned(
     return torch.where(zero_mask, torch.zeros_like(value), value)
 
 
+def _fp6e2m3_decode_aligned(
+    code: torch.Tensor,
+    hi_align_start: int = 2,
+    hi_align_exp_field: int = 3,
+    tail_pad_bits: int = 2,
+    exp_bits: int = 2,
+    mant_bits: int = 3,
+    exp_bias: int = 1,
+) -> torch.Tensor:
+    """
+    FP6 (E2M3) 近似解码：exp_bits=2, mant_bits=3，支持 tail_pad_bits 可正可负。
+    仅对 exp_field >= hi_align_start  && exp_field <= hi_align_exp_field 的值对齐到 hi_align_exp_field。
+    """
+    code = code.to(torch.uint8)
+    zero_mask = code == 0
+    sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
+    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).int()
+    mant_field = (code & ((1 << mant_bits) - 1)).int()
+
+    leading = torch.where(exp_field == 0, torch.zeros_like(exp_field), torch.ones_like(exp_field))
+    mant_full = (leading << mant_bits) | mant_field  # 前导 + 原尾数 (4 bits)
+    if tail_pad_bits >= 0:
+        mant_padded = mant_full << tail_pad_bits
+    else:
+        mant_padded = torch.bitwise_right_shift(mant_full, abs(tail_pad_bits))
+
+    exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias).float()
+    value_normal = mant_full.float() / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device), exp_unbiased)
+
+    hi_mask = (exp_field >= hi_align_start) & (exp_field <= hi_align_exp_field)
+    shift = torch.clamp(hi_align_exp_field - exp_field, min=0)
+    mant_aligned = torch.bitwise_right_shift(mant_padded, shift)
+    hi_unbiased = hi_align_exp_field - exp_bias
+    value_hi = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * (2.0 ** float(hi_unbiased))
+
+    value = torch.where(hi_mask, value_hi, value_normal)
+    value = torch.where(sign == 1, -value, value)
+    return torch.where(zero_mask, torch.zeros_like(value), value)
+
+
 def _fp6e3m2_decode_aligned_double_approx(
     code: torch.Tensor,
     hi_align_start: int = 4,
@@ -371,6 +411,68 @@ def _fp6e3m2_decode_aligned_double_approx(
     # target_exp = torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max)
     max_exp_val = (1 << exp_bits) - 1
     has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
+    target_exp = torch.where(
+        has_max_outlier,
+        torch.full_like(group_max, max_exp_val),
+        torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max),
+    )
+
+    shift = torch.clamp(target_exp - exp_groups, min=0)
+    mant_aligned = torch.bitwise_right_shift(mant_groups, shift)
+
+    hi_unbiased = target_exp - exp_bias
+    value = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * torch.pow(torch.tensor(2.0, device=code.device), hi_unbiased.float())
+    value = torch.where(sign_groups == 1, -value, value)
+    value = torch.where(zero_groups, torch.zeros_like(value), value)
+    return value.view(code.shape).t()
+
+
+def _fp6e2m3_decode_aligned_double_approx(
+    code: torch.Tensor,
+    hi_align_start: int = 2,
+    hi_align_exp_field: int = 3,
+    tail_pad_bits: int = 2,
+    exp_bits: int = 2,
+    mant_bits: int = 3,
+    exp_bias: int = 1,
+) -> torch.Tensor:
+    """
+    双近似 FP6 (E2M3) 解码：按4个为一组统计 outlier（exp < hi_align_start 或 exp > hi_align_exp_field）。
+      - 若组内出现指数=3（最大指数）的 outlier，则整组对齐到3。
+      - 否则 outlier_count <=1 的组对齐到 hi_align_exp_field，outlier_count >1 对齐到组内最大指数。
+      - 支持 tail_pad_bits < 0（右移截断尾数）。
+    """
+    code = code.to(torch.uint8).t()
+    zero_mask = code == 0
+    sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
+    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).int()
+    mant_field = (code & ((1 << mant_bits) - 1)).int()
+
+    leading = torch.where(exp_field == 0, torch.zeros_like(exp_field), torch.ones_like(exp_field))
+    mant_full = (leading << mant_bits) | mant_field
+    if tail_pad_bits >= 0:
+        mant_padded = mant_full << tail_pad_bits
+    else:
+        mant_padded = torch.bitwise_right_shift(mant_full, abs(tail_pad_bits))
+
+    flat_exp = exp_field.reshape(-1)
+    flat_mant = mant_padded.reshape(-1)
+    flat_sign = sign.reshape(-1)
+    flat_zero = zero_mask.reshape(-1)
+    if flat_exp.numel() % 4 != 0:
+        raise ValueError("fp6 e2m3 double approx requires total elements divisible by 4")
+    exp_groups = flat_exp.view(-1, 4)
+    mant_groups = flat_mant.view(-1, 4)
+    sign_groups = flat_sign.view(-1, 4)
+    zero_groups = flat_zero.view(-1, 4)
+
+    outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field)
+    outlier_count = outlier_mask.sum(dim=1, keepdim=True)
+    group_max = exp_groups.max(dim=1, keepdim=True).values
+
+    max_exp_val = (1 << exp_bits) - 1
+    has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
+
     target_exp = torch.where(
         has_max_outlier,
         torch.full_like(group_max, max_exp_val),
@@ -595,7 +697,17 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp4(normalized)
-                decoded = _fp4_decode_aligned(codes, target_exp_field=2, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype)
+                if FP4_EXP_BITS == 1:
+                    decoded = _fp4e1m2_decode_aligned(
+                        codes, 
+                        hi_align_start=self.fp4_hi_align_start,
+                        hi_align_exp_field=self.fp4_hi_align_exp_field,
+                        tail_pad_bits=self.fp4_tail_pad_bits,
+                        exp_bits=FP4_EXP_BITS, 
+                        mant_bits=FP4_MANTISSA_BITS,
+                        exp_bias=FP4_EXP_BIAS
+                    )
+                # decoded = _fp4_decode_aligned(codes, target_exp_field=2, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype)
             elif self.weight_format == "fp6":
                 fp_max_value = (1.0 + (2**FP6_MANTISSA_BITS - 1) / (2**FP6_MANTISSA_BITS)) * (2.0 ** ((1 << FP6_EXP_BITS) - 1 - FP6_EXP_BIAS))
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
@@ -624,7 +736,26 @@ class QuantLinear(nn.Module):
                             exp_bias=FP6_EXP_BIAS
                         ).to(self.weight.data.dtype)
                 elif FP6_EXP_BITS == 2:
-                    decoded = _fp4_to_float(codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype)
+                    if self.double_approximate:
+                        decoded = _fp6e2m3_decode_aligned_double_approx(
+                            codes,
+                            hi_align_start=self.fp6_hi_align_start,
+                            hi_align_exp_field=self.fp6_hi_align_exp_field,
+                            tail_pad_bits=self.fp6_tail_pad_bits,
+                            exp_bits=FP6_EXP_BITS,
+                            mant_bits=FP6_MANTISSA_BITS,
+                            exp_bias=FP6_EXP_BIAS,
+                        ).to(self.weight.data.dtype)
+                    else:
+                        decoded = _fp6e2m3_decode_aligned(
+                            codes,
+                            hi_align_start=self.fp6_hi_align_start,
+                            hi_align_exp_field=self.fp6_hi_align_exp_field,
+                            tail_pad_bits=self.fp6_tail_pad_bits,
+                            exp_bits=FP6_EXP_BITS,
+                            mant_bits=FP6_MANTISSA_BITS,
+                            exp_bias=FP6_EXP_BIAS,
+                        ).to(self.weight.data.dtype)
             elif self.weight_format == "fp8":
                 fp_max_value = (1.0 + (2**FP8_MANTISSA_BITS - 1) / (2**FP8_MANTISSA_BITS)) * (2.0 ** ((1 << FP8_EXP_BITS) - 1 - FP8_EXP_BIAS))
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
