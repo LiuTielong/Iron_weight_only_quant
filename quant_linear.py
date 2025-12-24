@@ -16,6 +16,71 @@ FP8_MANTISSA_BITS = 3
 FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
 
 
+def _pre_align_fp_activation(input: torch.Tensor):
+    """
+    模拟FIGLUT-I中的激活值预对齐操作。
+    将输入的浮点激活值对齐到每行（最后一个维度）的最大指数。
+    Args:
+        input: 浮点激活值张量, 为FP16。
+    Returns:
+        A tuple of (aligned_mantissas, exponents_max):
+        - aligned_mantissas: 预对齐后的激活值（逻辑上的尾数部分）。
+        - exponents_max: 用于对齐的最大指数。
+    """
+    assert input.dim() == 2
+    device = input.device
+    # ================== 1. 找到每行的最大指数 E_max ==================
+    abs_input = torch.abs(input)
+    nonzero_mask = abs_input > 0  # 避免对0取log2
+    # 初始化指数为一个非常小的值
+    exponents = torch.full_like(input, -float('inf'), dtype=torch.float32)
+    if torch.any(nonzero_mask):
+        min_nonezero = torch.min(abs_input[nonzero_mask])
+        # 用非0最小值填充0值，以便log2计算。实际上该数的指数非常小，不影响其他数
+        safe_abs_input = torch.where(nonzero_mask, abs_input, min_nonezero)  # 这句代码表示condition为True的位置取x的对应元素，否则取y的对应元素
+        # 计算每个元素的指数
+        calculated_exponents = torch.floor(torch.log2(safe_abs_input))
+        # 仅对原始非0值应用计算出的指数
+        exponents = torch.where(nonzero_mask, calculated_exponents, exponents)
+    
+    # 计算每行（最后一个维度）的最大指数
+    exponents_max = torch.max(exponents, dim=-1, keepdim=True)[0]
+    # 处理整行都是0的特殊情况，此时exponents_max为-inf
+    exponents_max = torch.where(torch.isfinite(exponents_max), exponents_max, torch.zeros_like(exponents_max))
+    exponents_max = exponents_max.to(input.dtype)
+
+    # ================== 2. 计算对齐后的浮点尾数 ==================
+    scaling_factors = torch.pow(2.0, exponents_max)
+    aligned_mantissas = (input.to(torch.float32) / scaling_factors.to(torch.float32))
+
+    # ================== 3. 转换为34位精度的定点整数 ==================
+    # 乘以 2^33 将其缩放到一个大的整数范围，一共保留34位有效数
+    # 使用.long()转换成64位整数以防溢出
+    aligned_int_mantissas = torch.round(aligned_mantissas.double() * 2**(MANTISSA_BITS-1)).long()
+
+    # ================== 4. 提取符号位 ==================
+    # 1 表示负数, 0 表示正数或零
+    sign_bit = (input < 0).long().unsqueeze(-1)  # 形状: [m, n, 1]
+
+    # ================== 5. 提取34位尾数 (向量化实现) ==================
+    abs_mantissas = torch.abs(aligned_int_mantissas).unsqueeze(-1)  # 形状: [m, n, 1]
+    # 创建一个用于提取位的除数向量：[2^33, 2^32, ..., 2^0]
+    bit_exponents = torch.arange(MANTISSA_BITS-1, -1, -1, device=device).long()
+    divisors = torch.pow(2, bit_exponents)
+
+    # 通过广播和整数除法/取模来高效地获取每一位
+    # (abs_mantissas // divisors) -> [m, n, 34]
+    # ... % 2 -> 得到每一位是0还是1
+    mantissa_bits = (abs_mantissas // divisors) % 2 # 形状: [m, n, 34]
+
+    # ================== 6. 拼接符号位和尾数位 ==================
+    output_bits = torch.cat([sign_bit, mantissa_bits], dim=-1) # 形状: [m, n, 35]
+
+    # 7. 返回结果
+    # 将行指数的形状从 [m, 1] 压缩到 [m]
+    return output_bits, exponents_max.squeeze(-1)
+
+
 def configure_fp_formats(
     fp4_exp_bits: int = FP4_EXP_BITS,
     fp4_mantissa_bits: int = FP4_MANTISSA_BITS,
@@ -107,37 +172,6 @@ def _fp4_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: i
     value = torch.where(is_subnormal, value_sub, value_normal)
     value = ((-1.0) ** sign) * value
     return torch.where(zero_mask, torch.zeros_like(value), value)
-
-
-def _fp4_decode_aligned(code: torch.Tensor, target_exp_field: int = 2, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
-    """
-    将 FP4 码字解码，并将指数对齐到 target_exp_field（偏移后的值）。
-    步骤：
-      1) 拆分符号、指数字段、尾数字段
-      2) 正规数尾数前补1，次正规补0，得到2位尾数
-      3) 尾数后补0，得到3位尾数
-      4) 按无偏指数对齐到 target_exp_field，再转成 FP32
-    """
-    code = code.to(torch.uint8)
-    sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
-    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).int()
-    mant_field = (code & ((1 << mant_bits) - 1)).int()
-
-    leading = torch.where(exp_field == 0, torch.zeros_like(exp_field), torch.ones_like(exp_field))
-    mant2 = (leading << 1) | mant_field  # 2 位
-    mant3 = mant2 << 1  # 补一位 0，变 3 位
-
-    # 无偏指数，次正规取 1 - bias
-    exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias)
-
-    # 对齐到目标无偏指数（默认 2），理论上不会出现负移
-    target_unbiased = target_exp_field
-    shift = torch.clamp(target_unbiased - exp_unbiased, min=0)
-    mant_shifted = torch.bitwise_right_shift(mant3, shift)
-
-    value = mant_shifted.float() / 4.0 * (2.0 ** float(target_unbiased))
-    value = torch.where(sign == 1, -value, value)
-    return value
 
 
 def _fp8_decode_aligned(
@@ -241,22 +275,27 @@ def _fp8_decode_aligned_double_approx(
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
     # 统计 outlier>=2 组的 max-min 差距分布
-    # group_min = exp_groups.min(dim=1, keepdim=True).values
-    # diff = (group_max - group_min).view(-1)
-    # mask_ge2 = (outlier_count.view(-1) >= 2)
-    # diff_ge2 = diff[mask_ge2]
-    # if diff_ge2.numel() > 0:
-    #     prob_lt4 = (diff_ge2 < 4).float().mean().item()
-    #     print(f"[fp8 double approx] prob(max-min<4 | outlier>=2) = {prob_lt4:.6f}")
-    #     # 绘制直方图
-    #     import matplotlib.pyplot as _plt
-    #     _plt.figure()
-    #     _plt.hist(diff_ge2.cpu().numpy(), bins=range(int(diff_ge2.max().item()) + 2), edgecolor='black', alpha=0.7)
-    #     _plt.title(f"FP8 double approx max-min diff (outlier>=2), prob<4={prob_lt4:.4f}")
-    #     _plt.xlabel("max-min diff")
-    #     _plt.ylabel("count")
-    #     _plt.savefig("./Iron_weight_only_quant/results/fp8_double_approx_diff.png")
-    #     _plt.close()
+    group_min = exp_groups.min(dim=1, keepdim=True).values
+    diff = (group_max - group_min).view(-1)
+    mask_ge2 = (outlier_count.view(-1) >= 2)
+    diff_ge2 = diff[mask_ge2]
+    if diff_ge2.numel() > 0:
+        prob_lt5 = (diff_ge2 < 5).float().mean().item()
+        print(f"[fp8 double approx] prob(max-min<5 | outlier>=2) = {prob_lt5:.6f}")
+        # 绘制直方图并显示百分比
+        import matplotlib.pyplot as _plt
+        _plt.figure()
+        hist_vals, bin_edges, _ = _plt.hist(diff_ge2.cpu().numpy(), bins=range(int(diff_ge2.max().item()) + 2), edgecolor='black', alpha=0.7)
+        total = hist_vals.sum()
+        for i, v in enumerate(hist_vals):
+            if v > 0 and total > 0:
+                pct = v / total * 100
+                _plt.text(bin_edges[i] + 0.4, v, f"{pct:.2f}%", ha="center", va="bottom", fontsize=8)
+        _plt.title(f"FP8 double approx max-min diff (outlier>=2), prob<5={prob_lt5:.4f}")
+        _plt.xlabel("max-min diff")
+        _plt.ylabel("count")
+        _plt.savefig("./Iron_weight_only_quant/results/fp8_double_approx_diff.png")
+        _plt.close()
     if align_logic == 0:
         target_exp = torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max)
     elif align_logic == 1:
@@ -408,6 +447,30 @@ def _fp6e3m2_decode_aligned_double_approx(
     outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field) 
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
+
+    # 统计 outlier>=2 组的 max-min 差距分布
+    # group_min = exp_groups.min(dim=1, keepdim=True).values
+    # diff = (group_max - group_min).view(-1)
+    # mask_ge2 = (outlier_count.view(-1) >= 2)
+    # diff_ge2 = diff[mask_ge2]
+    # if diff_ge2.numel() > 0:
+    #     prob_lt4 = (diff_ge2 < 4).float().mean().item()
+    #     print(f"[fp6e3m2 double approx] prob(max-min<4 | outlier>=2) = {prob_lt4:.6f}")
+    #     # 绘制直方图
+    #     import matplotlib.pyplot as _plt
+    #     _plt.figure()
+    #     hist_vals, bin_edges, _ = _plt.hist(diff_ge2.cpu().numpy(), bins=range(int(diff_ge2.max().item()) + 2), edgecolor='black', alpha=0.7)
+    #     total = hist_vals.sum()
+    #     for i, v in enumerate(hist_vals):
+    #         if v > 0 and total > 0:
+    #             pct = v / total * 100
+    #             _plt.text(bin_edges[i] + 0.4, v, f"{pct:.2f}%", ha="center", va="bottom", fontsize=8)
+    #     _plt.title(f"FP8 double approx max-min diff (outlier>=2), prob<4={prob_lt4:.4f}")
+    #     _plt.xlabel("max-min diff")
+    #     _plt.ylabel("count")
+    #     _plt.savefig("./Iron_weight_only_quant/results/fp6e3m2_double_approx_diff.png")
+    #     _plt.close()
+
     # target_exp = torch.where(outlier_count <= 1, torch.full_like(group_max, hi_align_exp_field), group_max)
     max_exp_val = (1 << exp_bits) - 1
     has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
@@ -469,6 +532,29 @@ def _fp6e2m3_decode_aligned_double_approx(
     outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field)
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
+
+    # # 统计 outlier>=2 组的 max-min 差距分布
+    # group_min = exp_groups.min(dim=1, keepdim=True).values
+    # diff = (group_max - group_min).view(-1)
+    # mask_ge2 = (outlier_count.view(-1) >= 2)
+    # diff_ge2 = diff[mask_ge2]
+    # if diff_ge2.numel() > 0:
+    #     prob_lt4 = (diff_ge2 < 4).float().mean().item()
+    #     print(f"[fp6e2m3 double approx] prob(max-min<4 | outlier>=2) = {prob_lt4:.6f}")
+    #     # 绘制直方图
+    #     import matplotlib.pyplot as _plt
+    #     _plt.figure()
+    #     hist_vals, bin_edges, _ = _plt.hist(diff_ge2.cpu().numpy(), bins=range(int(diff_ge2.max().item()) + 2), edgecolor='black', alpha=0.7)
+    #     total = hist_vals.sum()
+    #     for i, v in enumerate(hist_vals):
+    #         if v > 0 and total > 0:
+    #             pct = v / total * 100
+    #             _plt.text(bin_edges[i] + 0.4, v, f"{pct:.2f}%", ha="center", va="bottom", fontsize=8)
+    #     _plt.title(f"FP8 double approx max-min diff (outlier>=2), prob<4={prob_lt4:.4f}")
+    #     _plt.xlabel("max-min diff")
+    #     _plt.ylabel("count")
+    #     _plt.savefig("./Iron_weight_only_quant/results/fp6e2m3_double_approx_diff.png")
+    #     _plt.close()
 
     max_exp_val = (1 << exp_bits) - 1
     has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
@@ -616,6 +702,30 @@ def _fp4e2m1_decode_aligned_double_approx(
     outlier_mask = (exp_groups < hi_align_start) | (exp_groups > hi_align_exp_field)
     outlier_count = outlier_mask.sum(dim=1, keepdim=True)
     group_max = exp_groups.max(dim=1, keepdim=True).values
+
+    # # 统计 outlier>=2 组的 max-min 差距分布
+    # group_min = exp_groups.min(dim=1, keepdim=True).values
+    # diff = (group_max - group_min).view(-1)
+    # mask_ge2 = (outlier_count.view(-1) >= 2)
+    # diff_ge2 = diff[mask_ge2]
+    # if diff_ge2.numel() > 0:
+    #     prob_lt4 = (diff_ge2 < 4).float().mean().item()
+    #     print(f"[fp6e2m1 double approx] prob(max-min<4 | outlier>=2) = {prob_lt4:.6f}")
+    #     # 绘制直方图
+    #     import matplotlib.pyplot as _plt
+    #     _plt.figure()
+    #     hist_vals, bin_edges, _ = _plt.hist(diff_ge2.cpu().numpy(), bins=range(int(diff_ge2.max().item()) + 2), edgecolor='black', alpha=0.7)
+    #     total = hist_vals.sum()
+    #     for i, v in enumerate(hist_vals):
+    #         if v > 0 and total > 0:
+    #             pct = v / total * 100
+    #             _plt.text(bin_edges[i] + 0.4, v, f"{pct:.2f}%", ha="center", va="bottom", fontsize=8)
+    #     _plt.title(f"FP8 double approx max-min diff (outlier>=2), prob<4={prob_lt4:.4f}")
+    #     _plt.xlabel("max-min diff")
+    #     _plt.ylabel("count")
+    #     _plt.savefig("./Iron_weight_only_quant/results/fp6e2m1_double_approx_diff.png")
+    #     _plt.close()
+
     max_exp_val = (1 << exp_bits) - 1
     has_max_outlier = ((exp_groups == max_exp_val) & outlier_mask).any(dim=1, keepdim=True)
 
@@ -685,71 +795,6 @@ def _convert_bits_to_int(bits_tensor: torch.Tensor) -> torch.Tensor:
     signs = 1 - 2 * sign_bit  # maps {0, 1} to {1, -1}
     
     return mantissa_int * signs
-
-
-def _pre_align_fp_activation(input: torch.Tensor):
-    """
-    模拟FIGLUT-I中的激活值预对齐操作。
-    将输入的浮点激活值对齐到每行（最后一个维度）的最大指数。
-    Args:
-        input: 浮点激活值张量, 为FP16。
-    Returns:
-        A tuple of (aligned_mantissas, exponents_max):
-        - aligned_mantissas: 预对齐后的激活值（逻辑上的尾数部分）。
-        - exponents_max: 用于对齐的最大指数。
-    """
-    assert input.dim() == 2
-    device = input.device
-    # ================== 1. 找到每行的最大指数 E_max ==================
-    abs_input = torch.abs(input)
-    nonzero_mask = abs_input > 0  # 避免对0取log2
-    # 初始化指数为一个非常小的值
-    exponents = torch.full_like(input, -float('inf'), dtype=torch.float32)
-    if torch.any(nonzero_mask):
-        min_nonezero = torch.min(abs_input[nonzero_mask])
-        # 用非0最小值填充0值，以便log2计算。实际上该数的指数非常小，不影响其他数
-        safe_abs_input = torch.where(nonzero_mask, abs_input, min_nonezero)  # 这句代码表示condition为True的位置取x的对应元素，否则取y的对应元素
-        # 计算每个元素的指数
-        calculated_exponents = torch.floor(torch.log2(safe_abs_input))
-        # 仅对原始非0值应用计算出的指数
-        exponents = torch.where(nonzero_mask, calculated_exponents, exponents)
-    
-    # 计算每行（最后一个维度）的最大指数
-    exponents_max = torch.max(exponents, dim=-1, keepdim=True)[0]
-    # 处理整行都是0的特殊情况，此时exponents_max为-inf
-    exponents_max = torch.where(torch.isfinite(exponents_max), exponents_max, torch.zeros_like(exponents_max))
-    exponents_max = exponents_max.to(input.dtype)
-
-    # ================== 2. 计算对齐后的浮点尾数 ==================
-    scaling_factors = torch.pow(2.0, exponents_max)
-    aligned_mantissas = (input.to(torch.float32) / scaling_factors.to(torch.float32))
-
-    # ================== 3. 转换为34位精度的定点整数 ==================
-    # 乘以 2^33 将其缩放到一个大的整数范围，一共保留34位有效数
-    # 使用.long()转换成64位整数以防溢出
-    aligned_int_mantissas = torch.round(aligned_mantissas.double() * 2**(MANTISSA_BITS-1)).long()
-
-    # ================== 4. 提取符号位 ==================
-    # 1 表示负数, 0 表示正数或零
-    sign_bit = (input < 0).long().unsqueeze(-1)  # 形状: [m, n, 1]
-
-    # ================== 5. 提取34位尾数 (向量化实现) ==================
-    abs_mantissas = torch.abs(aligned_int_mantissas).unsqueeze(-1)  # 形状: [m, n, 1]
-    # 创建一个用于提取位的除数向量：[2^33, 2^32, ..., 2^0]
-    bit_exponents = torch.arange(MANTISSA_BITS-1, -1, -1, device=device).long()
-    divisors = torch.pow(2, bit_exponents)
-
-    # 通过广播和整数除法/取模来高效地获取每一位
-    # (abs_mantissas // divisors) -> [m, n, 34]
-    # ... % 2 -> 得到每一位是0还是1
-    mantissa_bits = (abs_mantissas // divisors) % 2 # 形状: [m, n, 34]
-
-    # ================== 6. 拼接符号位和尾数位 ==================
-    output_bits = torch.cat([sign_bit, mantissa_bits], dim=-1) # 形状: [m, n, 35]
-
-    # 7. 返回结果
-    # 将行指数的形状从 [m, 1] 压缩到 [m]
-    return output_bits, exponents_max.squeeze(-1)
 
 
 class QuantLinear(nn.Module):
