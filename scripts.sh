@@ -144,6 +144,15 @@ CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/
 # 3.7 FP6模型，双近似量化，3bit尾数
 CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0 --double_approximate
+# 3.8 FP6模型，近似量化，5bit尾数，不分离outlier
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp6_hi_align_start 0 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2
+# 3.9 FP6模型，近似量化，5bit尾数，分离outlier
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp6_hi_align_start 4 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2
+# 3.10 FP6模型，双近似量化，5bit尾数
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp6_hi_align_start 4 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2 --double_approximate
 
 # 4. FP6E3M2的ACC实验
 # 4.1 FP6模型
@@ -166,6 +175,15 @@ CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/
 # 4.7 FP6模型，双近似量化，3bit尾数
 CUDA_VISIBLE_DEVICES=7 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0 --double_approximate
+# 4.8 FP6模型，近似量化，5bit尾数，不分离outlier
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp6_hi_align_start 0 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2
+# 4.9 FP6模型，近似量化，5bit尾数，分离outlier
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp6_hi_align_start 4 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2
+# 4.10 FP6模型，双近似量化，5bit尾数
+CUDA_VISIBLE_DEVICES=7 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp6 --w_bits 6 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp6_hi_align_start 4 --fp6_hi_align_exp_field 7 --fp6_tail_pad_bits 2 --double_approximate
 
 # 5.FP6E2M3的PPL实验
 # 5.1 FP6模型
@@ -274,3 +292,14 @@ CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/
 # 10.7 FP4模型，双近似量化，3bit尾数
 CUDA_VISIBLE_DEVICES=7 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 128 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 2 --fp4_tail_pad_bits 1 --double_approximate
+
+# 11. INT量化的PPL实验和ACC实验
+# 13.1 INT4对称量化的PPL实验
+CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 4 --w_group_size 128 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 4 --w_group_size 128 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
+# 13.2 INT5量化的PPL实验和ACC实验
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 5 --w_group_size 128 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 5 --w_group_size 128 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
+# 13.3 INT6量化的PPL实验和ACC实验
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 6 --w_group_size 128 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/opt/6.7b/ --w_bits 6 --w_group_size 128 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0

@@ -1322,67 +1322,21 @@ class QuantLinear(nn.Module):
         if input.dim() > 2:
             input = input.reshape(-1, input.shape[-1])
 
-        # 根据mode选择前向计算方式（整数量化路径）
-        if self.mode == 0 or self.mode == 1:
-            weight_int = self.weight        
-            if self.w_group_size > 0: 
-                # per-group 量化， 需要按组处理
-                original_shape = self.weight.shape
-                weight_int = self.weight.reshape(-1, self.w_group_size)
+        # 整数量化：忽略 mode，直接反量化后用 F.linear
+        weight_int = self.weight
+        if self.w_group_size > 0: 
+            original_shape = self.weight.shape
+            weight_int = self.weight.reshape(-1, self.w_group_size)
 
-            # 反量化，适用于所有粒度的情况
-            if self.zeros is not None:
-                dequantized_weight = (weight_int - self.zeros) * self.scales
-            else:
-                dequantized_weight = weight_int * self.scales
-
-            if self.w_group_size > 0:
-                dequantized_weight = dequantized_weight.view(original_shape)
-            # FIGLUT-F模式和GPU模式都使用标准的线性层计算，因为GPU底层也是使用的FP32累加。
-            return F.linear(input, dequantized_weight, self.bias)
-        elif self.mode == 2:
-            # FIGLUT-I模式
-            # 1. 预对齐激活值
-            aligned_activations, row_exponents = _pre_align_fp_activation(input)
-            
-            # 2. 将二进制表示转换回逻辑整数
-            activations_int = _convert_bits_to_int(aligned_activations) # shape: [batch_size, in_features]
-
-            # 3. 准备INT4权重
-            weights_int = self.weight.long()  # shape: [out_features, in_features]
-
-            if self.w_group_size <= 0:
-                raise NotImplementedError("Only per-group quantization is supported in FIGLUT-I mode")
-        
-            num_groups = self.in_features // self.w_group_size
-            scales_w = self.scales.reshape(self.out_features, num_groups)  # shape: [out_features, num_groups]
-
-            # 4. 分组整数矩阵乘法
-            activations_grouped = activations_int.reshape(-1, num_groups, self.w_group_size)
-            weights_grouped = weights_int.reshape(self.out_features, num_groups, self.w_group_size)
-            activations_grouped_fp64 = activations_grouped.to(torch.float64)  # int64不被GPU支持，只能转换成FP64了
-            weights_grouped_fp64 = weights_grouped.to(torch.float64)
-            partial_sums_acc = torch.einsum('mgs,ogs->mog', activations_grouped_fp64, weights_grouped_fp64)
-
-            # 5. 缩放部分和并用FP32累加
-            scales_w_broadcastable = scales_w.unsqueeze(0).to(torch.float32)
-            partial_sums_fp = partial_sums_acc.to(torch.float32) * scales_w_broadcastable
-            partial_sums_fp /= 2**(MANTISSA_BITS-1)
-            accumulated_fp = torch.sum(partial_sums_fp, dim=2) # shape: [m, o]
-
-            # 6. 应用激活值的scale并添加偏置
-            row_exponents_fp32 = row_exponents.to(torch.float32)
-            act_scales = torch.pow(2.0, row_exponents_fp32).unsqueeze(-1)
-            output_rescaled = accumulated_fp * act_scales
-
-            if self.bias is not None:
-                output_rescaled = output_rescaled + self.bias.to(output_rescaled.dtype)
-            output = output_rescaled.to(input.dtype)
-
+        if self.zeros is not None:
+            dequantized_weight = (weight_int - self.zeros) * self.scales
         else:
-            raise ValueError("Invalid mode")
-        
-        # 恢复输入的原始形状
+            dequantized_weight = weight_int * self.scales
+
+        if self.w_group_size > 0:
+            dequantized_weight = dequantized_weight.view(original_shape)
+        output = F.linear(input, dequantized_weight, self.bias)
+
         if original_input_shape != input.shape:
             output = output.reshape(original_input_shape[:-1] + (self.out_features,))
 
