@@ -109,6 +109,19 @@ def configure_fp_formats(
     FP8_MANTISSA_BITS = int(fp8_mantissa_bits)
     FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
 
+def _rounding_rshift(val: torch.Tensor, shift: torch.Tensor | int) -> torch.Tensor:
+    """带四舍五入的右移，shift 可为逐元素位移。"""
+    if not torch.is_tensor(shift):
+        shift = torch.tensor(shift, device=val.device, dtype=val.dtype)
+    else:
+        shift = shift.to(val.dtype)
+    offset = torch.zeros_like(val)
+    mask = shift > 0
+    if mask.any():
+        offset_masked = torch.bitwise_left_shift(torch.ones_like(val[mask]), shift[mask] - 1)
+        offset[mask] = offset_masked
+    return torch.bitwise_right_shift(val + offset, shift)
+
 
 def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
@@ -250,7 +263,7 @@ def _fp_decode_aligned(
     if tail_pad_bits >= 0:
         mant_padded = mant_full << tail_pad_bits
     else:
-        mant_padded = torch.bitwise_right_shift(mant_full, abs(tail_pad_bits))
+        mant_padded = _rounding_rshift(mant_full, abs(tail_pad_bits))
 
     exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias).float()
     value_normal = mant_full.float() / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device), exp_unbiased)
@@ -260,7 +273,7 @@ def _fp_decode_aligned(
         hi_mask = hi_mask & (align_exp <= hi_align_exp_field)
 
     shift = torch.clamp(hi_align_exp_field - align_exp, min=0)
-    mant_aligned = torch.bitwise_right_shift(mant_padded, shift)
+    mant_aligned = _rounding_rshift(mant_padded, shift)
 
     hi_unbiased = hi_align_exp_field - exp_bias
     value_hi = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * (2.0 ** float(hi_unbiased))
@@ -270,18 +283,6 @@ def _fp_decode_aligned(
     return torch.where(zero_mask, torch.zeros_like(value), value)
 
 
-def _rounding_rshift(val: torch.Tensor, shift: torch.Tensor | int) -> torch.Tensor:
-    """带四舍五入的右移，shift 可为逐元素位移。"""
-    if not torch.is_tensor(shift):
-        shift = torch.tensor(shift, device=val.device, dtype=val.dtype)
-    else:
-        shift = shift.to(val.dtype)
-    offset = torch.zeros_like(val)
-    mask = shift > 0
-    if mask.any():
-        offset_masked = torch.bitwise_left_shift(torch.ones_like(val[mask]), shift[mask] - 1)
-        offset[mask] = offset_masked
-    return torch.bitwise_right_shift(val + offset, shift)
 
 
 def fp_decode_aligned_double_approx(
@@ -635,13 +636,20 @@ class QuantLinear(nn.Module):
         with torch.no_grad():
             if self.approximate:
                 return self.quantize_weight_approximate()
+            quant_transpose = self.quant_dim == 1
+            original_shape = self.weight.shape  # [out_features, in_features]
+            weight_for_quant = self.weight.data.t() if quant_transpose else self.weight.data
+            quant_shape = weight_for_quant.shape
+
+            def _reshape_back(tensor: torch.Tensor) -> torch.Tensor:
+                tensor = tensor.view(quant_shape)
+                return tensor.t() if quant_transpose else tensor
             if self.weight_format == "bfp":
                 if self.w_group_size <= 0:
                     raise ValueError("BFP 仅支持分组量化，请将 w_group_size 设为正数")
 
-                original_shape = self.weight.shape  # [out_features, in_features]
-                weight_tensor = self.weight.data
-                assert original_shape[-1] % self.w_group_size == 0
+                weight_tensor = weight_for_quant
+                assert quant_shape[-1] % self.w_group_size == 0
                 weight_tensor_grouped = weight_tensor.reshape(-1, self.w_group_size)
 
                 # 1) 先转为 FP16 并拆出 sign/exp/mantissa 字段
@@ -677,8 +685,8 @@ class QuantLinear(nn.Module):
                 scale = torch.pow(torch.tensor(2.0, device=weight_tensor_grouped.device), exp_unbiased.float() - float(frac_bits_keep))
                 dequantized = mant_rounded.to(weight_tensor_grouped.dtype) * scale * sign_factor.to(weight_tensor_grouped.dtype)
 
-                self.weight.data = dequantized.view(original_shape)
-                self.weight_bfp_mantissa = mant_rounded.view(original_shape).to(torch.int16)
+                self.weight.data = _reshape_back(dequantized)
+                self.weight_bfp_mantissa = _reshape_back(mant_rounded).to(torch.int16)
                 self.weight_bfp_exponent = exp_block.view(-1).to(torch.int16)
                 self.scales = None
                 self.zeros = None
@@ -688,18 +696,17 @@ class QuantLinear(nn.Module):
                 self.quantized.fill_(True)
                 return
             if self.weight_format == "fp4":
-                original_shape = self.weight.shape  # [out_features, in_features]
-                weight_tensor = self.weight.data
+                weight_tensor = weight_for_quant
 
                 if self.w_group_size > 0:
-                    assert original_shape[-1] % self.w_group_size == 0
+                    assert quant_shape[-1] % self.w_group_size == 0
                     weight_tensor_grouped = weight_tensor.reshape(-1, self.w_group_size)
                 elif self.w_group_size == -1:
                     # per-tensor 量化
                     weight_tensor_grouped = weight_tensor.reshape(1, -1)
                 elif self.w_group_size == -2:
                     # per-channel 量化
-                    weight_tensor_grouped = weight_tensor.reshape(original_shape[0], -1)
+                    weight_tensor_grouped = weight_tensor.reshape(quant_shape[0], -1)
                 else:
                     raise ValueError("Invalid w_group_size")
 
@@ -728,34 +735,33 @@ class QuantLinear(nn.Module):
                     self.scales = scales.view(1, 1).half()
                     self.zeros = zeros.view(1, 1).half() if zeros is not None else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(original_shape[0], 1).half()
-                    self.zeros = zeros.view(original_shape[0], 1).half() if zeros is not None else None
+                    self.scales = scales.view(quant_shape[0], 1).half()
+                    self.zeros = zeros.view(quant_shape[0], 1).half() if zeros is not None else None
                 else:
                     self.scales = scales.view(-1, 1).half()
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
                 # 存 FP4 码字，并写回反量化后的权重便于前向
-                self.weight_fp4 = fp4_codes.view(original_shape)
+                self.weight_fp4 = _reshape_back(fp4_codes)
                 self.weight_fp6 = None
                 self.weight_fp8 = None
                 dequantized = _fp_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
-                self.weight.data = dequantized.view(original_shape)
+                self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
 
             if self.weight_format == "fp6":
-                original_shape = self.weight.shape  # [out_features, in_features]
-                weight_tensor = self.weight.data
+                weight_tensor = weight_for_quant
 
                 if self.w_group_size > 0:
-                    assert original_shape[-1] % self.w_group_size == 0
+                    assert quant_shape[-1] % self.w_group_size == 0
                     weight_tensor_grouped = weight_tensor.reshape(-1, self.w_group_size)
                 elif self.w_group_size == -1:
                     weight_tensor_grouped = weight_tensor.reshape(1, -1)
                 elif self.w_group_size == -2:
-                    weight_tensor_grouped = weight_tensor.reshape(original_shape[0], -1)
+                    weight_tensor_grouped = weight_tensor.reshape(quant_shape[0], -1)
                 else:
                     raise ValueError("Invalid w_group_size")
 
@@ -779,33 +785,32 @@ class QuantLinear(nn.Module):
                     self.scales = scales.view(1, 1).half()
                     self.zeros = zeros.view(1, 1).half() if zeros is not None else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(original_shape[0], 1).half()
-                    self.zeros = zeros.view(original_shape[0], 1).half() if zeros is not None else None
+                    self.scales = scales.view(quant_shape[0], 1).half()
+                    self.zeros = zeros.view(quant_shape[0], 1).half() if zeros is not None else None
                 else:
                     self.scales = scales.view(-1, 1).half()
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
-                self.weight_fp6 = fp6_codes.view(original_shape)
+                self.weight_fp6 = _reshape_back(fp6_codes)
                 self.weight_fp4 = None
                 self.weight_fp8 = None
                 dequantized = _fp_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
-                self.weight.data = dequantized.view(original_shape)
+                self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
 
             if self.weight_format == "fp8":
-                original_shape = self.weight.shape  # [out_features, in_features]
-                weight_tensor = self.weight.data
+                weight_tensor = weight_for_quant
 
                 if self.w_group_size > 0:
-                    assert original_shape[-1] % self.w_group_size == 0
+                    assert quant_shape[-1] % self.w_group_size == 0
                     weight_tensor_grouped = weight_tensor.reshape(-1, self.w_group_size)
                 elif self.w_group_size == -1:
                     weight_tensor_grouped = weight_tensor.reshape(1, -1)
                 elif self.w_group_size == -2:
-                    weight_tensor_grouped = weight_tensor.reshape(original_shape[0], -1)
+                    weight_tensor_grouped = weight_tensor.reshape(quant_shape[0], -1)
                 else:
                     raise ValueError("Invalid w_group_size")
 
@@ -829,19 +834,19 @@ class QuantLinear(nn.Module):
                     self.scales = scales.view(1, 1).half()
                     self.zeros = zeros.view(1, 1).half() if zeros is not None else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(original_shape[0], 1).half()
-                    self.zeros = zeros.view(original_shape[0], 1).half() if zeros is not None else None
+                    self.scales = scales.view(quant_shape[0], 1).half()
+                    self.zeros = zeros.view(quant_shape[0], 1).half() if zeros is not None else None
                 else:
                     self.scales = scales.view(-1, 1).half()
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
-                self.weight_fp8 = fp8_codes.view(original_shape)
+                self.weight_fp8 = _reshape_back(fp8_codes)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
                 dequantized = _fp_to_float(fp8_codes, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
-                self.weight.data = dequantized.view(original_shape)
+                self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
 
@@ -853,18 +858,17 @@ class QuantLinear(nn.Module):
                 return
             
             # 计算量化参数
-            original_shape = self.weight.shape  # [out_features, in_features]
-            weight_tensor = self.weight.data
+            weight_tensor = weight_for_quant
 
             if self.w_group_size > 0:
-                assert original_shape[-1] % self.w_group_size == 0
+                assert quant_shape[-1] % self.w_group_size == 0
                 weight_tensor = weight_tensor.reshape(-1, self.w_group_size)
             elif self.w_group_size == -1:
                 # per-tensor 量化
                 weight_tensor = weight_tensor.reshape(1, -1)
             elif self.w_group_size == -2:
                 # per-channel 量化
-                weight_tensor = weight_tensor.reshape(original_shape[0], -1)
+                weight_tensor = weight_tensor.reshape(quant_shape[0], -1)
             else:
                 raise ValueError("Invalid w_group_size")
             
@@ -888,8 +892,8 @@ class QuantLinear(nn.Module):
                 self.scales = scales.view(1, 1)
                 self.zeros = zeros.view(1, 1) if not self.symmetric else None
             elif self.w_group_size == -2:
-                self.scales = scales.view(original_shape[0], 1)
-                self.zeros = zeros.view(original_shape[0], 1) if not self.symmetric else None
+                self.scales = scales.view(quant_shape[0], 1)
+                self.zeros = zeros.view(quant_shape[0], 1) if not self.symmetric else None
             else:
                 self.scales = scales.view(-1, 1)
                 self.zeros = zeros.view(-1, 1) if not self.symmetric else None
@@ -899,7 +903,7 @@ class QuantLinear(nn.Module):
                                     min_int, max_int)
             
             # 不要反量化，就存储int数据
-            self.weight.data = quantized_weight.view(original_shape)
+            self.weight.data = _reshape_back(quantized_weight)
             self.weight_fp4 = None
             self.weight_fp6 = None
             self.weight_fp8 = None
