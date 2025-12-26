@@ -110,41 +110,89 @@ def configure_fp_formats(
     FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
 
 
+# def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+#     """
+#     将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
+#     """
+#     sign = (x < 0).to(torch.uint8)
+#     x_abs = x.abs()
+#     zero_mask = x_abs == 0
+#     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
+
+#     max_exp_field = (1 << exp_bits) - 1
+#     min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
+
+#     # 原始无偏指数
+#     exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
+
+#     # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
+#     is_subnormal = exp_val < min_normal_exp
+
+#     # 正规数路径：指数夹在可表示范围内，再根据夹后的指数计算尾数
+#     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
+#     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
+#     mant_scale = 1 << mant_bits
+#     mant_normal = torch.round((x_abs_safe / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+#     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
+
+#     # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
+#     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
+#     mant_sub = torch.round((x_abs_safe / subnorm_denom) * mant_scale)
+#     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
+
+#     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
+#     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
+
+#     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
+#     # 零值强制编码为0，便于解码时恢复0
+#     code = torch.where(zero_mask, torch.zeros_like(code), code)
+#     return code
+
 def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
-    将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
+    将浮点张量量化为带次正规支持的 FP4 码字（低 4 位），量化步骤参考 fp4_quantize_cpu.py 的 _fp_scale：
+      1) 用 log2 估计指数并生成 scales；
+      2) 先对幅值按 scales 量化；
+      3) 再按 FP 编码规则写入指数字段与尾数字段。
     """
+    # 1. 记录符号并处理零
     sign = (x < 0).to(torch.uint8)
     x_abs = x.abs()
     zero_mask = x_abs == 0
     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
+    # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
+    if exp_bits == 1 and mant_bits == 2:  # E1M2，要将指数clamp为1
+        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+        tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
+    elif exp_bits == 2 and mant_bits == 1: # E2M1
+        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+    scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
+    x_q_abs = torch.round(x_abs_safe / scales) * scales
+    x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
+    # print(x_q_abs)
+
+    # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
     max_exp_field = (1 << exp_bits) - 1
-    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
+    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
 
-    # 原始无偏指数
-    exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
-
-    # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
+    exp_val = torch.floor(torch.log2(torch.where(x_q_abs == 0, torch.ones_like(x_q_abs), x_q_abs))).to(torch.int32)
     is_subnormal = exp_val < min_normal_exp
 
-    # 正规数路径：指数夹在可表示范围内，再根据夹后的指数计算尾数
     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
     mant_scale = 1 << mant_bits
-    mant_normal = torch.round((x_abs_safe / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+    mant_normal = torch.round((x_q_abs / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
 
-    # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
-    mant_sub = torch.round((x_abs_safe / subnorm_denom) * mant_scale)
+    mant_sub = torch.round((x_q_abs / subnorm_denom) * mant_scale)
     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
 
     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
 
     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
-    # 零值强制编码为0，便于解码时恢复0
     code = torch.where(zero_mask, torch.zeros_like(code), code)
     return code
 
