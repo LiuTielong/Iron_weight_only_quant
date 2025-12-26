@@ -110,96 +110,96 @@ def configure_fp_formats(
     FP8_EXP_BIAS = 2 ** (FP8_EXP_BITS - 1) - 1
 
 
-# def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
-#     """
-#     将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
-#     """
-#     sign = (x < 0).to(torch.uint8)
-#     x_abs = x.abs()
-#     zero_mask = x_abs == 0
-#     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
-
-#     max_exp_field = (1 << exp_bits) - 1
-#     min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
-
-#     # 原始无偏指数
-#     exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
-
-#     # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
-#     is_subnormal = exp_val < min_normal_exp
-
-#     # 正规数路径：指数夹在可表示范围内，再根据夹后的指数计算尾数
-#     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
-#     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
-#     mant_scale = 1 << mant_bits
-#     mant_normal = torch.round((x_abs_safe / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
-#     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
-
-#     # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
-#     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
-#     mant_sub = torch.round((x_abs_safe / subnorm_denom) * mant_scale)
-#     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
-
-#     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
-#     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
-
-#     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
-#     # 零值强制编码为0，便于解码时恢复0
-#     code = torch.where(zero_mask, torch.zeros_like(code), code)
-#     return code
-
-def _float_to_fp4(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
-    将浮点张量量化为带次正规支持的 FP4 码字（低 4 位），量化步骤参考 fp4_quantize_cpu.py 的 _fp_scale：
-      1) 用 log2 估计指数并生成 scales；
-      2) 先对幅值按 scales 量化；
-      3) 再按 FP 编码规则写入指数字段与尾数字段。
+    将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
     """
-    # 1. 记录符号并处理零
     sign = (x < 0).to(torch.uint8)
     x_abs = x.abs()
     zero_mask = x_abs == 0
     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
-    # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
-    if exp_bits == 1 and mant_bits == 2:  # E1M2，要将指数clamp为1
-        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
-        tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
-    elif exp_bits == 2 and mant_bits == 1: # E2M1
-        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
-    scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
-    x_q_abs = torch.round(x_abs_safe / scales) * scales
-    x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
-    # print(x_q_abs)
-
-    # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
     max_exp_field = (1 << exp_bits) - 1
-    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
+    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
 
-    exp_val = torch.floor(torch.log2(torch.where(x_q_abs == 0, torch.ones_like(x_q_abs), x_q_abs))).to(torch.int32)
+    # 原始无偏指数
+    exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
+
+    # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
     is_subnormal = exp_val < min_normal_exp
 
+    # 正规数路径：指数夹在可表示范围内，再根据夹后的指数计算尾数
     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
     mant_scale = 1 << mant_bits
-    mant_normal = torch.round((x_q_abs / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+    mant_normal = torch.round((x_abs_safe / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
 
+    # 次正规路径：指数字段为0，尾数直接近似 x_abs / 2^(min_normal_exp)
     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
-    mant_sub = torch.round((x_q_abs / subnorm_denom) * mant_scale)
+    mant_sub = torch.round((x_abs_safe / subnorm_denom) * mant_scale)
     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
 
     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
 
     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
+    # 零值强制编码为0，便于解码时恢复0
     code = torch.where(zero_mask, torch.zeros_like(code), code)
     return code
 
+# def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+#     """
+#     将浮点张量量化为带次正规支持的 FP 码字，包括 FP4/FP6/FP8.
+#       1) 用 log2 估计指数并生成 scales；
+#       2) 先对幅值按 scales 量化；
+#       3) 再按 FP 编码规则写入指数字段与尾数字段。
+#     """
+#     # 1. 记录符号并处理零
+#     sign = (x < 0).to(torch.uint8)
+#     x_abs = x.abs()
+#     zero_mask = x_abs == 0
+#     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
-def _fp4_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+#     # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
+#     if exp_bits == 1 and mant_bits == 2:  # E1M2，要将指数clamp为1
+#         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+#         tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
+#     elif exp_bits == 2 and mant_bits == 1: # E2M1
+#         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+#     scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
+#     x_q_abs = torch.round(x_abs_safe / scales) * scales
+#     x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
+#     # print(x_q_abs)
+
+#     # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
+#     max_exp_field = (1 << exp_bits) - 1
+#     min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
+
+#     exp_val = torch.floor(torch.log2(torch.where(x_q_abs == 0, torch.ones_like(x_q_abs), x_q_abs))).to(torch.int32)
+#     is_subnormal = exp_val < min_normal_exp
+
+#     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
+#     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
+#     mant_scale = 1 << mant_bits
+#     mant_normal = torch.round((x_q_abs / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+#     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
+
+#     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
+#     mant_sub = torch.round((x_q_abs / subnorm_denom) * mant_scale)
+#     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
+
+#     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
+#     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
+
+#     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
+#     code = torch.where(zero_mask, torch.zeros_like(code), code)
+#     return code
+
+
+def _fp_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
-    将 FP4 (E2M1) 码字还原为浮点，支持次正规。输入为 uint8/long，返回 FP32。
+    将 FP4/FP6/FP8 码字还原为浮点，支持次正规。输入为 uint8/long，返回 FP32。
     """
     code = code.to(torch.uint8)
     zero_mask = code == 0
@@ -798,7 +798,7 @@ def _count_fp4_values(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bit
     统计 FP4 码字解码后的 15/16 个可表示值各自出现的次数。
     返回 (values, counts, fig)，两者 shape 相同，fig 为已绘制的条形图。
     """
-    decoded = _fp4_to_float(code, exp_bits=exp_bits, mant_bits=mant_bits, exp_bias=exp_bias).reshape(-1)
+    decoded = _fp_to_float(code, exp_bits=exp_bits, mant_bits=mant_bits, exp_bias=exp_bias).reshape(-1)
     values, counts = torch.unique(decoded, sorted=True, return_counts=True)
     values_np = values.cpu().numpy()
     counts_np = counts.cpu().numpy()
@@ -938,7 +938,7 @@ class QuantLinear(nn.Module):
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
-                codes = _float_to_fp4(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
+                codes = _float_to_fp(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
                 if FP4_EXP_BITS == 1:
                     decoded = _fp4e1m2_decode_aligned(
                         codes, 
@@ -975,7 +975,7 @@ class QuantLinear(nn.Module):
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
-                codes = _float_to_fp4(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
+                codes = _float_to_fp(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
                 if FP6_EXP_BITS == 3:
                     if self.double_approximate:
                         decoded = _fp6e3m2_decode_aligned_double_approx(
@@ -1023,7 +1023,7 @@ class QuantLinear(nn.Module):
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
-                codes = _float_to_fp4(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
+                codes = _float_to_fp(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
                 if self.double_approximate:
                     decoded = _fp8_decode_aligned_double_approx(
                         codes,
@@ -1167,7 +1167,7 @@ class QuantLinear(nn.Module):
                     zeros = mid_val
                     normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp4_max_value, max=fp4_max_value)
 
-                fp4_codes = _float_to_fp4(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
+                fp4_codes = _float_to_fp(normalized, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS)
 
                 # 保存 scale 形状
                 if self.w_group_size == -1:
@@ -1184,7 +1184,7 @@ class QuantLinear(nn.Module):
                 self.weight_fp4 = fp4_codes.view(original_shape)
                 self.weight_fp6 = None
                 self.weight_fp8 = None
-                dequantized = _fp4_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
+                dequantized = _fp_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)
@@ -1219,7 +1219,7 @@ class QuantLinear(nn.Module):
                     scales = (span / fp6_max_value).clamp(min=1e-5)
                     zeros = mid_val
                     normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp6_max_value, max=fp6_max_value)
-                fp6_codes = _float_to_fp4(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
+                fp6_codes = _float_to_fp(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
 
                 if self.w_group_size == -1:
                     self.scales = scales.view(1, 1).half()
@@ -1234,7 +1234,7 @@ class QuantLinear(nn.Module):
                 self.weight_fp6 = fp6_codes.view(original_shape)
                 self.weight_fp4 = None
                 self.weight_fp8 = None
-                dequantized = _fp4_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
+                dequantized = _fp_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)
@@ -1269,7 +1269,7 @@ class QuantLinear(nn.Module):
                     scales = (span / fp8_max_value).clamp(min=1e-5)
                     zeros = mid_val
                     normalized = torch.clamp((weight_tensor_grouped - zeros) / scales, min=-fp8_max_value, max=fp8_max_value)
-                fp8_codes = _float_to_fp4(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
+                fp8_codes = _float_to_fp(normalized, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS)
 
                 if self.w_group_size == -1:
                     self.scales = scales.view(1, 1).half()
@@ -1284,7 +1284,7 @@ class QuantLinear(nn.Module):
                 self.weight_fp8 = fp8_codes.view(original_shape)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
-                dequantized = _fp4_to_float(fp8_codes, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype) * scales
+                dequantized = _fp_to_float(fp8_codes, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 self.weight.data = dequantized.view(original_shape)

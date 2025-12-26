@@ -156,6 +156,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_batch_size", type=int, default=None, help="lm-eval 最大自适应 batch size")
     p.add_argument("--offline", action="store_true", help="lm-eval 强制离线，只用本地缓存")
     p.add_argument("--hf_cache", type=str, default=None, help="可选：指定 HF 数据/模型缓存目录")
+    p.add_argument("--output_file", type=str, default=None, help="lm-eval 结果输出文件")
 
     return p.parse_args()
 
@@ -345,7 +346,7 @@ def run_lm_eval(args: argparse.Namespace) -> None:
     # 如需保存 lm-eval 结果
     out_path = Path(args.output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    results_file = out_path / "lm_eval_results.json"
+    results_file = out_path / args.output_file if args.output_file else out_path / "lm_eval_results.json"
     with open(results_file, "w") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     print(f"\n💾 lm-eval results saved to: {results_file}")
