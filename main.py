@@ -94,8 +94,10 @@ class SequentialPPLEvaluator:
                 chunk = tokens[:, i * self.seqlen:(i + 1) * self.seqlen].to(self.device)
                 outputs = model(chunk, labels=chunk)
                 chunk_tokens = chunk.size(1)
-                total_nll += outputs.loss.item() * chunk_tokens
-                total_tokens += chunk_tokens
+                # HF causal LM loss is averaged over seq_len-1 tokens after shift
+                effective_tokens = max(chunk_tokens - 1, 1)
+                total_nll += outputs.loss.item() * effective_tokens
+                total_tokens += effective_tokens
         if total_tokens == 0:
             return float('inf'), 0, nsamples
         ppl = math.exp(total_nll / total_tokens)
@@ -107,6 +109,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval_mode", type=str, default="ppl", choices=["ppl", "lm_eval"], help="选择评测模式：ppl 或 lm_eval")
     p.add_argument("--model_path", type=str, required=True, help="原始 FP16 模型目录")
     p.add_argument("--device", type=str, default="cuda", help="推理设备，如 cuda 或 cpu")
+    p.add_argument("--ppl_seqlen", type=int, default=2048, help="PPL 计算使用的序列长度窗口")
     p.add_argument("--use_flash_attn", action="store_true", help="是否启用 Flash Attention (构建模型时)")
     p.add_argument("--output_dir", type=str, default="./ppl_experiment_results", help="结果输出目录（ppl 会写入文件）")
     p.add_argument("--local_dataset_dir", type=str, default="/home/liutielong/Files_2025/data/ppl_datasets", help="PPL 数据集本地目录，可通过环境变量使用")
@@ -301,7 +304,7 @@ def run_ppl(args: argparse.Namespace) -> None:
         print(f"\n{'='*50}\n🔄 Testing {config_name.upper()} Quantization\n{'='*50}")
         calib_ds = args.datasets[0] if args.gptq else None
         model, tokenizer = build_and_quantize(args, w_bit, args.device, calib_dataset=calib_ds)
-        evaluator = SequentialPPLEvaluator(model.half(), args.model_path, args.device)
+        evaluator = SequentialPPLEvaluator(model.half(), args.model_path, args.device, seqlen=args.ppl_seqlen)
         results[config_name] = {}
         for dataset_name in args.datasets:
             print(f"\n📊 Evaluating on {dataset_name.upper()}...")
