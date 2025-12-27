@@ -850,103 +850,90 @@ class QuantLinear(nn.Module):
                 self.quantized.fill_(True)
                 return
 
-            if self.w_bit >= 16:
-                self.quantized.fill_(False)
+            if self.weight_format == "int":
+                weight_tensor = weight_for_quant
+                if self.w_bit >= 16:
+                    self.quantized.fill_(False)
+                    self.weight_fp4 = None
+                    self.weight_fp6 = None
+                    self.weight_fp8 = None
+                    return
+                
+                # 计算量化参数
+
+                if self.w_group_size > 0:
+                    assert quant_shape[-1] % self.w_group_size == 0
+                    weight_tensor = weight_tensor.reshape(-1, self.w_group_size)
+                elif self.w_group_size == -1:
+                    # per-tensor 量化
+                    weight_tensor = weight_tensor.reshape(1, -1)
+                elif self.w_group_size == -2:
+                    # per-channel 量化
+                    weight_tensor = weight_tensor.reshape(quant_shape[0], -1)
+                else:
+                    raise ValueError("Invalid w_group_size")
+                
+                # 计算scales和zeros并存储
+                if self.symmetric:
+                    max_val = weight_tensor.abs().amax(dim=1, keepdim=True)
+                    max_val = max_val.clamp(min=1e-5)
+                    max_int = 2 ** (self.w_bit - 1) - 1
+                    min_int = -(2 ** (self.w_bit - 1))
+                    scales = max_val / max_int
+                    zeros = 0
+                else:
+                    max_val = weight_tensor.amax(dim=1, keepdim=True)
+                    min_val = weight_tensor.amin(dim=1, keepdim=True)
+                    max_int = 2**self.w_bit - 1
+                    min_int = 0
+                    scales = (max_val - min_val).clamp(min=1e-5) / max_int
+                    zeros = (-min_val / scales).round().clamp(min_int, max_int)
+                
+                if self.w_group_size == -1:
+                    self.scales = scales.view(1, 1)
+                    self.zeros = zeros.view(1, 1) if not self.symmetric else None
+                elif self.w_group_size == -2:
+                    self.scales = scales.view(quant_shape[0], 1)
+                    self.zeros = zeros.view(quant_shape[0], 1) if not self.symmetric else None
+                else:
+                    self.scales = scales.view(-1, 1)
+                    self.zeros = zeros.view(-1, 1) if not self.symmetric else None
+
+                # 量化权重
+                quantized_weight = torch.clamp(
+                    torch.round(weight_tensor / self.scales) + (self.zeros if self.zeros is not None else 0),
+                    min_int,
+                    max_int,
+                )
+
+                # 反量化写回，保持与其他格式一致的行为
+                if self.zeros is not None:
+                    dequantized_weight = (quantized_weight - self.zeros) * self.scales
+                else:
+                    dequantized_weight = quantized_weight * self.scales
+
+                self.weight.data = _reshape_back(dequantized_weight)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
                 self.weight_fp8 = None
+                self.quantized.fill_(True)
                 return
-            
-            # 计算量化参数
-            weight_tensor = weight_for_quant
 
-            if self.w_group_size > 0:
-                assert quant_shape[-1] % self.w_group_size == 0
-                weight_tensor = weight_tensor.reshape(-1, self.w_group_size)
-            elif self.w_group_size == -1:
-                # per-tensor 量化
-                weight_tensor = weight_tensor.reshape(1, -1)
-            elif self.w_group_size == -2:
-                # per-channel 量化
-                weight_tensor = weight_tensor.reshape(quant_shape[0], -1)
-            else:
-                raise ValueError("Invalid w_group_size")
-            
-            # 计算scales和zeros并存储
-            if self.symmetric:
-                max_val = weight_tensor.abs().amax(dim=1, keepdim=True)
-                max_val = max_val.clamp(min=1e-5)
-                max_int = 2 ** (self.w_bit - 1) - 1
-                min_int = -(2 ** (self.w_bit - 1))
-                scales = max_val / max_int
-                zeros = 0
-            else:
-                max_val = weight_tensor.amax(dim=1, keepdim=True)
-                min_val = weight_tensor.amin(dim=1, keepdim=True)
-                max_int = 2**self.w_bit - 1
-                min_int = 0
-                scales = (max_val - min_val).clamp(min=1e-5) / max_int
-                zeros = (-min_val / scales).round().clamp(min_int, max_int)
-            
-            if self.w_group_size == -1:
-                self.scales = scales.view(1, 1)
-                self.zeros = zeros.view(1, 1) if not self.symmetric else None
-            elif self.w_group_size == -2:
-                self.scales = scales.view(quant_shape[0], 1)
-                self.zeros = zeros.view(quant_shape[0], 1) if not self.symmetric else None
-            else:
-                self.scales = scales.view(-1, 1)
-                self.zeros = zeros.view(-1, 1) if not self.symmetric else None
-
-            # 量化权重
-            quantized_weight = torch.clamp(torch.round(weight_tensor / self.scales) + (self.zeros if self.zeros is not None else 0),
-                                    min_int, max_int)
-            
-            # 不要反量化，就存储int数据
-            self.weight.data = _reshape_back(quantized_weight)
-            self.weight_fp4 = None
-            self.weight_fp6 = None
-            self.weight_fp8 = None
-            self.quantized.fill_(True)
+            raise ValueError(f"Unsupported weight_format in quantize_weight: {self.weight_format}")
     
     def forward(self, input):
         """前向传播"""
         if not self.quantized:
             return F.linear(input, self.weight, self.bias)
 
-        # FP/BFP 权重在量化阶段已解码到 self.weight，直接使用
-        if self.weight_format in {"fp4", "fp6", "fp8", "bfp"}:
+        # 权重在量化阶段已解码到 self.weight，直接使用
+        if self.weight_format in {"fp4", "fp6", "fp8", "bfp", "int"}:
             original_input_shape = input.shape
             weight = self.weight.to(input.dtype)
             out = F.linear(input, weight, self.bias)
             if input.dim() > 2:
                 out = out.reshape(original_input_shape[:-1] + (self.out_features,))
             return out
-
-        # 确保输入是2D的 (batch_size, in_features)
-        original_input_shape = input.shape
-        if input.dim() > 2:
-            input = input.reshape(-1, input.shape[-1])
-
-        # 整数量化：忽略 mode，直接反量化后用 F.linear
-        weight_int = self.weight
-        if self.w_group_size > 0: 
-            original_shape = self.weight.shape
-            weight_int = self.weight.reshape(-1, self.w_group_size)
-
-        if self.zeros is not None:
-            dequantized_weight = (weight_int - self.zeros) * self.scales
-        else:
-            dequantized_weight = weight_int * self.scales
-
-        if self.w_group_size > 0:
-            dequantized_weight = dequantized_weight.view(original_shape)
-        output = F.linear(input, dequantized_weight, self.bias)
-
-        if original_input_shape != input.shape:
-            output = output.reshape(original_input_shape[:-1] + (self.out_features,))
-
-        return output
 
     @classmethod
     def from_linear(

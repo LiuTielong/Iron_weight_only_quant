@@ -31,7 +31,7 @@ from gptq.datautils import get_loaders
 from quant_wrapper import quantize_model
 from quant_linear import configure_fp_formats
 from utils import build_model_and_enc
-from visualize_utils import plot_random_fp8_exponent_dists, plot_fp8_exponent_heatmaps, count_fp8_exponent_outliers
+from visualize_utils import plot_random_fp_dists, plot_random_fp_exponent_dists
 
 # lm-eval imports（仅在 lm_eval 模式下使用）
 from lm_eval import evaluator, tasks
@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w_group_size", type=int, default=-2, choices=[-1, -2, 32, 64, 128, 256, 512, 1024], help="-1: per-tensor, -2: per-channel, >0: per-group")
     p.add_argument("--w_symmetric", action="store_true", help="权重对称量化")
     p.add_argument("--w_format", type=str, default="int", choices=["int", "fp4", "fp6", "fp8", "bfp"], help="权重量化格式")
-    p.add_argument("--quant_dim", type=int, default=1, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
+    p.add_argument("--quant_dim", type=int, default=0, choices=[0, 1], help="近似量化分组维度：0 按行/输入维分组，1 按列/输出维分组")
     p.add_argument("--mode", type=int, default=0, choices=[0, 1, 2], help="0: GPU, 1: FIGLUT-F, 2: FIGLUT-I")
     p.add_argument("--approximate", action="store_true", help="近似量化")
     p.add_argument("--double_approximate", action="store_true", help="两层近似量化")
@@ -146,7 +146,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--calib_dataset", type=str, default="wikitext2", help="GPTQ 校准数据集 (get_loaders 名称)")
 
     # PPL 评测参数
-    p.add_argument("--datasets", nargs="+", default=["wikitext", "ptb", "c4"], choices=["wikitext", "ptb", "c4"], help="PPL 评测数据集")
+    p.add_argument("--datasets", nargs="+", default=["wikitext", "ptb", "c4"], help="PPL 评测数据集")
     p.add_argument("--sample_size", type=int, default=None, help="每个数据集使用的 chunk 数（None 表示全量）")
 
     # lm-eval 评测参数
@@ -157,6 +157,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--offline", action="store_true", help="lm-eval 强制离线，只用本地缓存")
     p.add_argument("--hf_cache", type=str, default=None, help="可选：指定 HF 数据/模型缓存目录")
     p.add_argument("--output_file", type=str, default=None, help="lm-eval 结果输出文件")
+
+    # 其他参数
+    p.add_argument("--visualize", action="store_true", help="可视化结果")
 
     return p.parse_args()
 
@@ -229,7 +232,7 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
     if w_bit < 16:
         print(f"⚙️ Applying quantization: w_bit={w_bit}, group={args.w_group_size}, format={args.w_format}")
         original_device = next(model.parameters()).device
-        model = model.cpu()
+        #model = model.cpu()
         torch.cuda.empty_cache()
         qargs = make_quant_args(args, w_bit)
         if args.gptq:
@@ -246,21 +249,29 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
             )
             qargs.dataloader = dataloader
         model = quantize_model(model, qargs)
+
         # 可视化
-        # if args.w_format == "fp4" and 4 in args.w_bits:
-        #     plot_random_fp4_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp4_dists.png")
-        #     plot_random_fp4_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp4_exponent_dists.png")
-        # if args.w_format == "fp6" and 6 in args.w_bits:
-        #     plot_random_fp6_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp6_dists.png")
-        #     plot_random_fp6_uniform_bins(model, k=10, seed=0, num_bins=16, save_path="./Iron_weight_only_quant/results/fp6_uniform_bins.png")
-        #     plot_random_fp6_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp6_exponent_dists.png")
-        # if args.w_format == "fp8" and 8 in args.w_bits:
-        #     plot_random_fp8_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp8_dists.png")
-        #     plot_random_fp8_uniform_bins(model, k=10, seed=0, num_bins=32, save_path="./Iron_weight_only_quant/results/fp8_uniform_bins.png")
-        #     plot_random_fp8_exponent_dists(model, k=10, seed=0, save_path="./Iron_weight_only_quant/results/fp8_exponent_dists.png")
-        #     plot_fp8_exponent_heatmaps(model, num_layers=4, block_size=64, seed=0, save_path="./Iron_weight_only_quant/results/fp8_exponent_heatmaps.png")
-        #     count_fp8_exponent_outliers(model, group_size=4, threshold=11, exp_bits=args.fp8_exp_bits, mant_bits=args.fp8_mantissa_bits, k=10, seed=0)
-        model = model.to(device)
+        if args.visualize:
+            if args.w_format == "fp4":
+                plot_random_fp_dists(model, k=10, seed=0, save_path=f"./fp_dist_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                    weight_attr=f"weight_{args.w_format}", exp_bits=args.fp4_exp_bits, mant_bits=args.fp4_mantissa_bits,
+                                    exp_bias=None, title_prefix=None)
+                plot_random_fp_exponent_dists(model, k=10, seed=0, save_path=f"./fp_exp_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                            weight_attr=f"weight_{args.w_format}", exp_bits=args.fp4_exp_bits, mant_bits=args.fp4_mantissa_bits)
+            elif args.w_format == "fp6":
+                plot_random_fp_dists(model, k=10, seed=0, save_path=f"./fp_dist_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                    weight_attr=f"weight_{args.w_format}", exp_bits=args.fp6_exp_bits, mant_bits=args.fp6_mantissa_bits,
+                                    exp_bias=None, title_prefix=None)
+                plot_random_fp_exponent_dists(model, k=10, seed=0, save_path=f"./fp_exp_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                            weight_attr=f"weight_{args.w_format}", exp_bits=args.fp6_exp_bits, mant_bits=args.fp6_mantissa_bits)
+            elif args.w_format == "fp8":
+                plot_random_fp_dists(model, k=10, seed=0, save_path=f"./fp_dist_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                    weight_attr=f"weight_{args.w_format}", exp_bits=args.fp8_exp_bits, mant_bits=args.fp8_mantissa_bits,
+                                    exp_bias=None, title_prefix=None)
+                plot_random_fp_exponent_dists(model, k=10, seed=0, save_path=f"./fp_exp_w{w_bit}_{args.w_format}_g{args.w_group_size}.png",
+                                            weight_attr=f"weight_{args.w_format}", exp_bits=args.fp8_exp_bits, mant_bits=args.fp8_mantissa_bits)
+            
+        #model = model.to(device)
         torch.cuda.empty_cache()
     else:
         model = model.to(device)

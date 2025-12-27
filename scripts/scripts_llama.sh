@@ -1,7 +1,7 @@
 """
-把所有实验在llama模型上跑一遍
+Llama总实验
 """
-# 1. 测量ppl
+# 1. FP8量化测量ppl
 # 1.1 FP16模型
 CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 16 --eval_mode ppl --datasets wikitext ptb c4
 # 1.2 FP8模型
@@ -39,7 +39,7 @@ CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/
 --fp8_hi_align_start 13 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1 --double_approximate
 
 
-# 2. 测量acc
+# 2. FP8量化测量acc
 # 2.1 FP16模型
 CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 16 --eval_mode lm_eval  --tasks arc_easy arc_challenge boolq gsm8k rte lambada hellaswag piqa --num_fewshot 0
 CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 16 --eval_mode lm_eval  --tasks arc_easy gsm8k --num_fewshot 5
@@ -247,34 +247,43 @@ CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/
 # 12.1 FP16
 CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 16 --eval_mode ppl --datasets wikitext ptb c4
 # 12.2 INT4
-CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
 # 12.3 BFP4
-CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format bfp --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format bfp --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
 # 12.4 FP4E1M2
-CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
 # 12.5 FP4E2M1
 CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
 # 12.6 ours(FP4E1M2到3bit尾数，分离outlier)
 CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 1 --fp4_tail_pad_bits 0
-# 12.8 ours(FP4E2M1到3bit尾数，分离outlier)
+# 12.7 ours(FP4E2M1到3bit尾数，分离outlier)
 CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 2 --fp4_tail_pad_bits 1
-# 12.9 ours(FP4E2M1到3bit尾数，double近似）
+# 12.8 ours(FP4E2M1到3bit尾数，double近似）
 CUDA_VISIBLE_DEVICES=7 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 2 --fp4_tail_pad_bits 1 --double_approximate
-# 12.10 ours(FP6E2M3到3bit尾数，分离outlier)
+# 12.9 ours(FP6E2M3到3bit尾数，分离outlier)
 CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 2 --fp6_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp6_hi_align_start 0 --fp6_hi_align_exp_field 2 --fp6_tail_pad_bits -1
-# 12.11 ours(FP6E2M3到3bit尾数，double近似）
+# 12.10 ours(FP6E2M3到3bit尾数，double近似）
 CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 2 --fp6_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp6_hi_align_start 0 --fp6_hi_align_exp_field 2 --fp6_tail_pad_bits -1 --double_approximate
-# 12.12 ours(FP6E3M2到3bit尾数，分离outlier)
+# 12.11 ours(FP6E3M2到3bit尾数，分离outlier)
 CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0
-# 12.13 ours(FP6E3M2到3bit尾数，double近似）
+# 12.12 ours(FP6E3M2到3bit尾数，double近似）
 CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0 --double_approximate
+# 13.13 ours(FP8到3bit尾数，不分离outlier)
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 0 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1
+# 13.14 ours(FP8到3bit尾数，分离outlier)
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 13 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1
+# 13.15 ours(FP8到3bit尾数, double近似)
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 13 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1 --double_approximate
 
 # 13. 4bit量化，各种数据格式，ACC实验
 # 13.1 FP16
@@ -283,18 +292,18 @@ CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/
 CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
 # 13.3 BFP4
 CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format bfp --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
-# 13.4 FP4E1M2
-CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
-# 13.5 FP4E2M1
-CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
+# 13.4 FP4E1M2（按行或者按列）
+CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
+# 13.5 FP4E2M1（按行或者按列）
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0
 # 13.6 ours(FP4E1M2到3it尾数，分离outlier)
-CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 1 --fp4_tail_pad_bits 0
 # 13.7 ours(FP4E2M1到3bit尾数，分离outlier)
-CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 2 --fp4_tail_pad_bits 1
 # 13.8 ours(FP4E2M1到3bit尾数，double近似）
-CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp4_hi_align_start 0 --fp4_hi_align_exp_field 2 --fp4_tail_pad_bits 1 --double_approximate
 # 13.9 ours(FP6E2M3到3bit尾数，分离outlier)
 CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 2 --fp6_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
@@ -303,28 +312,32 @@ CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/
 CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 2 --fp6_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp6_hi_align_start 0 --fp6_hi_align_exp_field 2 --fp6_tail_pad_bits -1 --double_approximate
 # 13.11 ours(FP6E3M2到3bit尾数，分离outlier)
-CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0
 # 13.12 ours(FP6E3M2到3bit尾数，double近似）
-CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
 --fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0 --double_approximate
+# 13.13 ours(FP8到3bit尾数，不分离outlier)
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp8_hi_align_start 0 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1
+# 13.14 ours(FP8到3bit尾数，分离outlier)
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp8_hi_align_start 13 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1
+# 13.15 ours(FP8到3bit尾数, double近似)
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_easy arc_challenge boolq rte lambada hellaswag piqa --num_fewshot 0 \
+--fp8_hi_align_start 13 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits -1 --double_approximate
 
 
-
-
-
-
-CUDA_VISIBLE_DEVICES=0 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 16 --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0
-CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0
-CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0
-CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0
-CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0 \
---fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0
-CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp6 --w_bits 6 --fp6_exp_bits 3 --fp6_mantissa_bits 2 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode lm_eval --tasks arc_challenge --num_fewshot 0 \
---fp6_hi_align_start 4 --fp6_hi_align_exp_field 6 --fp6_tail_pad_bits 0 --double_approximate
-
-
-
-
-CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 128 --w_symmetric --eval_mode lm_eval  --tasks gsm8k --num_fewshot 5
-CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 128 --w_symmetric --eval_mode lm_eval  --tasks mmlu --num_fewshot 0
+# 探索4bit量化的情况下，按行量化与按列量化的差异，做PPL实验
+# int 4, 按行
+CUDA_VISIBLE_DEVICES=1 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+# int 4，按列
+CUDA_VISIBLE_DEVICES=2 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 4 --w_group_size 64 --quant_dim 1 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+# FP4E1M2，按行
+CUDA_VISIBLE_DEVICES=3 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+# FP4E1M2，按列
+CUDA_VISIBLE_DEVICES=4 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 1 --fp4_mantissa_bits 2 --w_group_size 64 --quant_dim 1 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+# FP4E2M1，按行
+CUDA_VISIBLE_DEVICES=5 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
+# FP4E2M1，按列
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp4 --w_bits 4 --fp4_exp_bits 2 --fp4_mantissa_bits 1 --w_group_size 64 --quant_dim 1 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4
