@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda", help="推理设备，如 cuda 或 cpu")
     p.add_argument("--ppl_seqlen", type=int, default=2048, help="PPL 计算使用的序列长度窗口")
     p.add_argument("--use_flash_attn", action="store_true", help="是否启用 Flash Attention (构建模型时)")
-    p.add_argument("--output_dir", type=str, default="./ppl_experiment_results", help="结果输出目录（ppl 会写入文件）")
+    p.add_argument("--output_dir", type=str, default="./All_results", help="结果输出目录（ppl 会写入文件）")
     p.add_argument("--local_dataset_dir", type=str, default="/home/liutielong/Files_2025/data/ppl_datasets", help="PPL 数据集本地目录，可通过环境变量使用")
 
     # 量化参数
@@ -212,6 +212,39 @@ def make_quant_args(args: argparse.Namespace, w_bit: int):
             self.dataloader = None
     return QuantArgs()
 
+def make_quant_config(args: argparse.Namespace, w_bit: int) -> dict:
+    """Extract quantization-related CLI参数，便于结果文件记录。"""
+    return {
+        "w_bit": w_bit,
+        "w_group_size": args.w_group_size,
+        "w_symmetric": args.w_symmetric,
+        "w_format": args.w_format,
+        "quant_dim": args.quant_dim,
+        "mode": args.mode,
+        "approximate": args.approximate,
+        "double_approximate": args.double_approximate,
+        "fp4_exp_bits": args.fp4_exp_bits,
+        "fp4_mantissa_bits": args.fp4_mantissa_bits,
+        "fp6_exp_bits": args.fp6_exp_bits,
+        "fp6_mantissa_bits": args.fp6_mantissa_bits,
+        "fp8_exp_bits": args.fp8_exp_bits,
+        "fp8_mantissa_bits": args.fp8_mantissa_bits,
+        "fp4_hi_align_start": args.fp4_hi_align_start,
+        "fp4_hi_align_exp_field": args.fp4_hi_align_exp_field,
+        "fp4_tail_pad_bits": args.fp4_tail_pad_bits,
+        "fp6_hi_align_start": args.fp6_hi_align_start,
+        "fp6_hi_align_exp_field": args.fp6_hi_align_exp_field,
+        "fp6_tail_pad_bits": args.fp6_tail_pad_bits,
+        "fp8_hi_align_start": args.fp8_hi_align_start,
+        "fp8_hi_align_exp_field": args.fp8_hi_align_exp_field,
+        "fp8_tail_pad_bits": args.fp8_tail_pad_bits,
+        "gptq": args.gptq,
+        "nsamples": args.nsamples,
+        "percdamp": args.percdamp,
+        "act_order": args.act_order,
+        "calib_dataset": args.calib_dataset,
+    }
+
 
 def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_dataset: Optional[str] = None) -> Tuple[torch.nn.Module, object]:
     """Load model/tokenizer, run quantization (on CPU) if needed, and move to device."""
@@ -305,13 +338,16 @@ def run_ppl(args: argparse.Namespace) -> None:
         calib_ds = args.datasets[0] if args.gptq else None
         model, tokenizer = build_and_quantize(args, w_bit, args.device, calib_dataset=calib_ds)
         evaluator = SequentialPPLEvaluator(model.half(), args.model_path, args.device, seqlen=args.ppl_seqlen)
-        results[config_name] = {}
+        results[config_name] = {
+            "quant_args": make_quant_config(args, w_bit),
+            "datasets": {},
+        }
         for dataset_name in args.datasets:
             print(f"\n📊 Evaluating on {dataset_name.upper()}...")
             start_time = time.time()
             ppl, token_count, chunk_count = evaluator.calculate_ppl(dataset_name, max_chunks=args.sample_size)
             elapsed = time.time() - start_time
-            results[config_name][dataset_name] = {
+            results[config_name]["datasets"][dataset_name] = {
                 "perplexity": ppl,
                 "num_tokens": token_count,
                 "num_chunks": chunk_count,
@@ -320,9 +356,11 @@ def run_ppl(args: argparse.Namespace) -> None:
             print(f"📝 {dataset_name}: chunks={chunk_count}, tokens={token_count}, ppl={ppl:.4f}, time={elapsed:.2f}s")
         del model, tokenizer
         torch.cuda.empty_cache()
-
-    results_file = output_dir / "ppl_results.json"
-    with open(results_file, "w") as f:
+        
+    out_path = Path(args.output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    results_file = out_path / args.output_file if args.output_file else out_path / "lm_eval_results.json"
+    with open(results_file, "a") as f:
         json.dump(results, f, indent=2)
     print(f"\n💾 PPL results saved to: {results_file}")
 
@@ -352,7 +390,10 @@ def run_lm_eval(args: argparse.Namespace) -> None:
             batch_size=None,
             task_manager=task_manager,
         )
-        all_results[config_name] = res["results"]
+        all_results[config_name] = {
+            "quant_args": make_quant_config(args, w_bit),
+            "results": res["results"],
+        }
         print(json.dumps(res["results"], indent=2, ensure_ascii=False))
         del model, tokenizer, hf_lm
         torch.cuda.empty_cache()
@@ -361,7 +402,7 @@ def run_lm_eval(args: argparse.Namespace) -> None:
     out_path = Path(args.output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     results_file = out_path / args.output_file if args.output_file else out_path / "lm_eval_results.json"
-    with open(results_file, "w") as f:
+    with open(results_file, "a") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     print(f"\n💾 lm-eval results saved to: {results_file}")
 

@@ -123,9 +123,9 @@ def _rounding_rshift(val: torch.Tensor, shift: torch.Tensor | int) -> torch.Tens
     return torch.bitwise_right_shift(val + offset, shift)
 
 
-def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor:
     """
-    将浮点张量量化为带次正规支持的 FP4 (E2M1) 码字，存放在 uint8 的低 4 位。
+    将浮点张量量化为带次正规支持的FP4/6/8码字。
     """
     sign = (x < 0).to(torch.uint8)
     x_abs = x.abs()
@@ -161,8 +161,9 @@ def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int =
     code = torch.where(zero_mask, torch.zeros_like(code), code)
     return code
 
-# def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
+# def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor:
 #     """
+#     跟AxCore学的，做成两步量化。
 #     将浮点张量量化为带次正规支持的 FP 码字，包括 FP4/FP6/FP8.
 #       1) 用 log2 估计指数并生成 scales；
 #       2) 先对幅值按 scales 量化；
@@ -175,15 +176,14 @@ def _float_to_fp(x: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int =
 #     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
 #     # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
-#     if exp_bits == 1 and mant_bits == 2:  # E1M2，要将指数clamp为1
+#     if (exp_bits == 1 and mant_bits == 2):  # FP4-E1M2，PF6-E3M2, 要将指数clamp为1
 #         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
 #         tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
-#     elif exp_bits == 2 and mant_bits == 1: # E2M1
+#     else:  # 其他FP，PF4-E2M1, FP8.
 #         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
 #     scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
 #     x_q_abs = torch.round(x_abs_safe / scales) * scales
 #     x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
-#     # print(x_q_abs)
 
 #     # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
 #     max_exp_field = (1 << exp_bits) - 1
@@ -281,8 +281,6 @@ def _fp_decode_aligned(
     value = torch.where(hi_mask, value_hi, value_normal)
     value = torch.where(sign == 1, -value, value)
     return torch.where(zero_mask, torch.zeros_like(value), value)
-
-
 
 
 def fp_decode_aligned_double_approx(
@@ -519,56 +517,30 @@ class QuantLinear(nn.Module):
                 scales = (max_val / fp_max_value).clamp(min=1e-5)
                 normalized = torch.clamp(weight_grouped / scales, min=-fp_max_value, max=fp_max_value)
                 codes = _float_to_fp(normalized, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS)
-                if FP6_EXP_BITS == 3:
-                    if self.double_approximate:
-                        decoded = fp_decode_aligned_double_approx(
-                            codes, 
-                            hi_align_start=self.fp6_hi_align_start, 
-                            hi_align_exp_field=self.fp6_hi_align_exp_field, 
-                            tail_pad_bits=self.fp6_tail_pad_bits, 
-                            exp_bits=FP6_EXP_BITS, 
-                            mant_bits=FP6_MANTISSA_BITS, 
-                            exp_bias=FP6_EXP_BIAS,
-                            align_subnorm_exp_as_one=False,
-                            handle_max_outlier=True,
-                        ).to(self.weight.data.dtype)
-                    else:
-                        decoded = _fp_decode_aligned(
-                            codes, 
-                            hi_align_start=self.fp6_hi_align_start, 
-                            hi_align_exp_field=self.fp6_hi_align_exp_field, 
-                            tail_pad_bits=self.fp6_tail_pad_bits, 
-                            exp_bits=FP6_EXP_BITS, 
-                            mant_bits=FP6_MANTISSA_BITS,
-                            exp_bias=FP6_EXP_BIAS,
-                            align_subnorm_exp_as_one=False,
-                            limit_align_exp_to_field=True,
-                        ).to(self.weight.data.dtype)
-                elif FP6_EXP_BITS == 2:
-                    if self.double_approximate:
-                        decoded = fp_decode_aligned_double_approx(
-                            codes,
-                            hi_align_start=self.fp6_hi_align_start,
-                            hi_align_exp_field=self.fp6_hi_align_exp_field,
-                            tail_pad_bits=self.fp6_tail_pad_bits,
-                            exp_bits=FP6_EXP_BITS,
-                            mant_bits=FP6_MANTISSA_BITS,
-                            exp_bias=FP6_EXP_BIAS,
-                            align_subnorm_exp_as_one=False,
-                            handle_max_outlier=True,
-                        ).to(self.weight.data.dtype)
-                    else:
-                        decoded = _fp_decode_aligned(
-                            codes,
-                            hi_align_start=self.fp6_hi_align_start,
-                            hi_align_exp_field=self.fp6_hi_align_exp_field,
-                            tail_pad_bits=self.fp6_tail_pad_bits,
-                            exp_bits=FP6_EXP_BITS,
-                            mant_bits=FP6_MANTISSA_BITS,
-                            exp_bias=FP6_EXP_BIAS,
-                            align_subnorm_exp_as_one=False,
-                            limit_align_exp_to_field=True,
-                        ).to(self.weight.data.dtype)
+                if self.double_approximate:
+                    decoded = fp_decode_aligned_double_approx(
+                        codes,
+                        hi_align_start=self.fp6_hi_align_start,
+                        hi_align_exp_field=self.fp6_hi_align_exp_field,
+                        tail_pad_bits=self.fp6_tail_pad_bits,
+                        exp_bits=FP6_EXP_BITS,
+                        mant_bits=FP6_MANTISSA_BITS,
+                        exp_bias=FP6_EXP_BIAS,
+                        align_subnorm_exp_as_one=True,
+                        handle_max_outlier=True,
+                    ).to(self.weight.data.dtype)
+                else:
+                    decoded = _fp_decode_aligned(
+                        codes,
+                        hi_align_start=self.fp6_hi_align_start,
+                        hi_align_exp_field=self.fp6_hi_align_exp_field,
+                        tail_pad_bits=self.fp6_tail_pad_bits,
+                        exp_bits=FP6_EXP_BITS,
+                        mant_bits=FP6_MANTISSA_BITS,
+                        exp_bias=FP6_EXP_BIAS,
+                        align_subnorm_exp_as_one=True,
+                        limit_align_exp_to_field=True,
+                    ).to(self.weight.data.dtype)
             elif self.weight_format == "fp8":
                 fp_max_value = (1.0 + (2**FP8_MANTISSA_BITS - 1) / (2**FP8_MANTISSA_BITS)) * (2.0 ** ((1 << FP8_EXP_BITS) - 1 - FP8_EXP_BIAS))
                 max_val = weight_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
@@ -584,8 +556,8 @@ class QuantLinear(nn.Module):
                         exp_bits=FP8_EXP_BITS,
                         mant_bits=FP8_MANTISSA_BITS,
                         exp_bias=FP8_EXP_BIAS,
-                        align_subnorm_exp_as_one=False,
-                        handle_max_outlier=False,
+                        align_subnorm_exp_as_one=True,
+                        handle_max_outlier=True,
                     ).to(self.weight.data.dtype)
                 else:
                     decoded = _fp_decode_aligned(
@@ -596,11 +568,11 @@ class QuantLinear(nn.Module):
                         exp_bits=FP8_EXP_BITS,
                         mant_bits=FP8_MANTISSA_BITS,
                         exp_bias=FP8_EXP_BIAS,
-                        align_subnorm_exp_as_one=False,
-                        limit_align_exp_to_field=False,
+                        align_subnorm_exp_as_one=True,
+                        limit_align_exp_to_field=True,
                     ).to(self.weight.data.dtype)
             else:
-                raise NotImplementedError("approximate 目前仅支持 fp4/fp8")
+                raise NotImplementedError("approximate 目前仅支持 fp4/fp6/fp8")
 
             self.scales = scales.view(-1, 1).half()
             self.zeros = None
