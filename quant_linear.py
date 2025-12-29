@@ -384,6 +384,13 @@ class QuantLinear(nn.Module):
     """
     自定义量化线性层, 支持量化后的权重和FP16激活值之间的矩阵乘法
     """
+    _bfp_seed_counter = 0  # 为 BFP 随机决策提供按层递增的偏移
+
+    @classmethod
+    def _next_bfp_seed_offset(cls):
+        cls._bfp_seed_counter += 1
+        return cls._bfp_seed_counter
+
     def __init__(self, in_features, out_features, bias=True, w_bit=4, w_group_size=128, symmetric=True, mode=0, weight_format: str = "int", approximate: bool = False, quant_dim: int = 0, fp8_hi_align_start: int = 12, fp8_hi_align_exp_field: int = 15, fp8_tail_pad_bits: int = 1, double_approximate: bool = False, fp6_hi_align_start: int = 4, fp6_hi_align_exp_field: int = 7, fp6_tail_pad_bits: int = 2, fp4_hi_align_start: int = 1, fp4_hi_align_exp_field: int = 1, fp4_tail_pad_bits: int = 0):
         """
         Args:
@@ -644,7 +651,24 @@ class QuantLinear(nn.Module):
                 target_mant_bits = min(self.w_bit - 1, 11)  # 含前导1，最多11位
                 shift_down = max(0, 11 - target_mant_bits)
                 if shift_down > 0:
-                    mant_rounded = mant_aligned >> shift_down
+                    prob_round = float(getattr(self, "bfp_round_prob", 0.36))
+                    prob_round = max(0.0, min(1.0, prob_round))
+                    # 独立 RNG，隔离全局随机数；默认每层使用不同偏移，可通过 bfp_round_seed 设基准种子
+                    rng = getattr(self, "_bfp_rng", None)
+                    if rng is None or rng.device != mant_aligned.device:
+                        rng = torch.Generator(device=mant_aligned.device)
+                        base_seed = int(getattr(self, "bfp_round_seed", 0))
+                        offset = getattr(self, "_bfp_seed_offset", None)
+                        if offset is None:
+                            offset = QuantLinear._next_bfp_seed_offset()
+                            self._bfp_seed_offset = offset
+                        rng.manual_seed(base_seed + int(offset))
+                        self._bfp_rng = rng
+                    use_round = torch.rand(1, device=mant_aligned.device, generator=rng).item() < prob_round
+                    if use_round:
+                        mant_rounded = _rounding_rshift(mant_aligned, shift_down)
+                    else:
+                        mant_rounded = torch.bitwise_right_shift(mant_aligned, shift_down)
                 else:
                     mant_rounded = mant_aligned
                 mant_max = (1 << target_mant_bits) - 1
@@ -653,13 +677,15 @@ class QuantLinear(nn.Module):
                 # 6) 直接反量化：按共享指数左移，再按保留的小数位右移，还原近似值
                 frac_bits_keep = target_mant_bits - 1  # 去掉前导1后的位数
                 sign_factor = torch.where(sign == 1, -1.0, 1.0)
-                exp_unbiased = exp_block.to(torch.int32) - 15  # FP16 bias = 15
-                scale = torch.pow(torch.tensor(2.0, device=weight_tensor_grouped.device), exp_unbiased.float() - float(frac_bits_keep))
+                scale = torch.pow(torch.tensor(2.0, device=weight_tensor_grouped.device), (exp_block-15).float() - float(frac_bits_keep))
                 dequantized = mant_rounded.to(weight_tensor_grouped.dtype) * scale * sign_factor.to(weight_tensor_grouped.dtype)
+                dequantized = dequantized.to(weight_tensor_grouped.dtype)
 
                 self.weight.data = _reshape_back(dequantized)
-                self.weight_bfp_mantissa = _reshape_back(mant_rounded).to(torch.int16)
-                self.weight_bfp_exponent = exp_block.view(-1).to(torch.int16)
+                # self.weight_bfp_mantissa = _reshape_back(mant_rounded).to(torch.int16)  # 不保存了，占显存
+                # self.weight_bfp_exponent = exp_block.view(-1).to(torch.int16)
+                self.weight_bfp_mantissa = None
+                self.weight_bfp_exponent = None
                 self.scales = None
                 self.zeros = None
                 self.weight_fp4 = None
@@ -720,6 +746,7 @@ class QuantLinear(nn.Module):
                 dequantized = _fp_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
+                dequantized = dequantized.to(self.weight.data.dtype)
                 self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
@@ -769,6 +796,7 @@ class QuantLinear(nn.Module):
                 dequantized = _fp_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
+                dequantized = dequantized.to(self.weight.data.dtype)
                 self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
@@ -818,6 +846,7 @@ class QuantLinear(nn.Module):
                 dequantized = _fp_to_float(fp8_codes, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype) * scales
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
+                dequantized = dequantized.to(self.weight.data.dtype)
                 self.weight.data = _reshape_back(dequantized)
                 self.quantized.fill_(True)
                 return
@@ -884,6 +913,7 @@ class QuantLinear(nn.Module):
                 else:
                     dequantized_weight = quantized_weight * self.scales
 
+                dequantized_weight = dequantized_weight.to(self.weight.data.dtype)
                 self.weight.data = _reshape_back(dequantized_weight)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
