@@ -379,6 +379,14 @@ def _count_fp4_values(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bit
     return values, counts
 
 
+def cuda_mem(tag=""):
+    torch.cuda.synchronize()
+    a = torch.cuda.memory_allocated() / 1024**2
+    r = torch.cuda.memory_reserved() / 1024**2
+    p = torch.cuda.max_memory_allocated() / 1024**2
+    print(f"[{tag}] allocated={a:.1f}MB reserved={r:.1f}MB peak={p:.1f}MB")
+
+
 class QuantLinear(nn.Module):
     """
     自定义量化线性层, 支持量化后的权重和FP16激活值之间的矩阵乘法
@@ -604,9 +612,11 @@ class QuantLinear(nn.Module):
                 self.weight_fp4 = None
                 self.weight_fp6 = None
 
-            self.weight.data = dequantized.view(original_shape)
+            # self.weight.data = dequantized.view(original_shape)
+            self.weight.data.copy_(dequantized.view(original_shape).to(self.weight.data.dtype))
             self.quantized.fill_(True)
             self.approximate = True
+            # cuda_mem()
             return
 
 
@@ -686,7 +696,8 @@ class QuantLinear(nn.Module):
                 dequantized = mant_rounded.to(weight_tensor_grouped.dtype) * scale * sign_factor.to(weight_tensor_grouped.dtype)
                 dequantized = dequantized.to(weight_tensor_grouped.dtype)
 
-                self.weight.data = _reshape_back(dequantized)
+                # self.weight.data = _reshape_back(dequantized)
+                self.weight.data.copy_(_reshape_back(dequantized))
                 # self.weight_bfp_mantissa = _reshape_back(mant_rounded).to(torch.int16)  # 不保存了，占显存
                 # self.weight_bfp_exponent = exp_block.view(-1).to(torch.int16)
                 self.weight_bfp_mantissa = None
@@ -752,7 +763,8 @@ class QuantLinear(nn.Module):
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 dequantized = dequantized.to(self.weight.data.dtype)
-                self.weight.data = _reshape_back(dequantized)
+                # self.weight.data = _reshape_back(dequantized)
+                self.weight.data.copy_(_reshape_back(dequantized))
                 self.quantized.fill_(True)
                 return
 
@@ -802,7 +814,8 @@ class QuantLinear(nn.Module):
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 dequantized = dequantized.to(self.weight.data.dtype)
-                self.weight.data = _reshape_back(dequantized)
+                # self.weight.data = _reshape_back(dequantized)
+                self.weight.data.copy_(_reshape_back(dequantized))
                 self.quantized.fill_(True)
                 return
 
@@ -852,7 +865,8 @@ class QuantLinear(nn.Module):
                 if self.zeros is not None:
                     dequantized = dequantized + self.zeros.to(dequantized.dtype)
                 dequantized = dequantized.to(self.weight.data.dtype)
-                self.weight.data = _reshape_back(dequantized)
+                # self.weight.data = _reshape_back(dequantized)
+                self.weight.data.copy_(_reshape_back(dequantized))
                 self.quantized.fill_(True)
                 return
 
@@ -919,14 +933,14 @@ class QuantLinear(nn.Module):
                     dequantized_weight = quantized_weight * self.scales
 
                 dequantized_weight = dequantized_weight.to(self.weight.data.dtype)
-                self.weight.data = _reshape_back(dequantized_weight)
+                # self.weight.data = _reshape_back(dequantized_weight)
+                self.weight.data.copy_(_reshape_back(dequantized_weight))
                 self.weight_fp4 = None
                 self.weight_fp6 = None
                 self.weight_fp8 = None
                 self.quantized.fill_(True)
                 torch.cuda.empty_cache()
-                del dequantized_weight
-                del quantized_weight
+                # cuda_mem()
                 return
 
             raise ValueError(f"Unsupported weight_format in quantize_weight: {self.weight_format}")
