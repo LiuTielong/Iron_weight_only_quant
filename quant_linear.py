@@ -651,24 +651,29 @@ class QuantLinear(nn.Module):
                 target_mant_bits = min(self.w_bit - 1, 11)  # 含前导1，最多11位
                 shift_down = max(0, 11 - target_mant_bits)
                 if shift_down > 0:
-                    prob_round = float(getattr(self, "bfp_round_prob", 0.36))
-                    prob_round = max(0.0, min(1.0, prob_round))
-                    # 独立 RNG，隔离全局随机数；默认每层使用不同偏移，可通过 bfp_round_seed 设基准种子
-                    rng = getattr(self, "_bfp_rng", None)
-                    if rng is None or rng.device != mant_aligned.device:
-                        rng = torch.Generator(device=mant_aligned.device)
-                        base_seed = int(getattr(self, "bfp_round_seed", 0))
-                        offset = getattr(self, "_bfp_seed_offset", None)
-                        if offset is None:
-                            offset = QuantLinear._next_bfp_seed_offset()
-                            self._bfp_seed_offset = offset
-                        rng.manual_seed(base_seed + int(offset))
-                        self._bfp_rng = rng
-                    use_round = torch.rand(1, device=mant_aligned.device, generator=rng).item() < prob_round
-                    if use_round:
-                        mant_rounded = _rounding_rshift(mant_aligned, shift_down)
-                    else:
-                        mant_rounded = torch.bitwise_right_shift(mant_aligned, shift_down)
+                    # p = 0.0  # 四舍五入rounding的概率
+                    # prob_round = float(getattr(self, "bfp_round_prob", p))
+                    # prob_round = max(0.0, min(1.0, prob_round))
+                    # # 独立 RNG，隔离全局随机数；默认每层使用不同偏移，可通过 bfp_round_seed 设基准种子
+                    # rng = getattr(self, "_bfp_rng", None)
+                    # if rng is None or rng.device != mant_aligned.device:
+                    #     rng = torch.Generator(device=mant_aligned.device)
+                    #     base_seed = int(getattr(self, "bfp_round_seed", 0))
+                    #     offset = getattr(self, "_bfp_seed_offset", None)
+                    #     if offset is None:
+                    #         offset = QuantLinear._next_bfp_seed_offset()
+                    #         self._bfp_seed_offset = offset
+                    #     rng.manual_seed(base_seed + int(offset))
+                    #     self._bfp_rng = rng
+                    # use_round = torch.rand(1, device=mant_aligned.device, generator=rng).item() < prob_round
+                    # if use_round:
+                    #     print(1)
+                    #     mant_rounded = _rounding_rshift(mant_aligned, shift_down)
+                    # else:
+                    #     mant_rounded = torch.bitwise_right_shift(mant_aligned, shift_down)
+                    # mant_rounded = _rounding_rshift(mant_aligned, shift_down)
+                    # mant_rounded = torch.bitwise_right_shift(mant_aligned, shift_down)
+                    mant_rounded = _rounding_rshift(mant_aligned, shift_down)
                 else:
                     mant_rounded = mant_aligned
                 mant_max = (1 << target_mant_bits) - 1
