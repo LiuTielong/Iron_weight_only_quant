@@ -13,7 +13,8 @@ import os
 import time
 from pathlib import Path
 from typing import Optional, Tuple
-
+from accelerate import infer_auto_device_map, dispatch_model
+from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 import torch
 
 os.environ["HF_DATASETS_OFFLINE"] = "1"
@@ -85,13 +86,27 @@ class SequentialPPLEvaluator:
             raise ValueError(f"Dataset {dataset_name} is shorter than the model sequence length ({self.seqlen}).")
         if max_chunks is not None and max_chunks > 0:
             nsamples = min(nsamples, max_chunks)
-        model = self.model.to(self.device)
+        # 避免对已 dispatch 的模型再调用 .to()，用模型所在设备作为输入设备
+        if hasattr(self.model, "hf_device_map"):
+            device_for_input = self.model.hf_device_map.get("model.embed_tokens", None)
+            if device_for_input is None:
+                device_for_input = next(iter(self.model.hf_device_map.values()))
+            device_for_input = torch.device(device_for_input)
+            model = self.model
+        else:
+            device_for_input = torch.device(self.device)
+            model = self.model.to(device_for_input)
         model.eval()
         total_nll = 0.0
         total_tokens = 0
         with torch.no_grad():
             for i in range(nsamples):
-                chunk = tokens[:, i * self.seqlen:(i + 1) * self.seqlen].to(self.device)
+                chunk = tokens[:, i * self.seqlen:(i + 1) * self.seqlen]
+                if hasattr(self.model, "hf_device_map"):
+                    # 直接送到嵌入所在设备，避免 CPU/设备混用
+                    chunk = chunk.to(device_for_input)
+                else:
+                    chunk = chunk.to(device_for_input)
                 outputs = model(chunk, labels=chunk)
                 chunk_tokens = chunk.size(1)
                 # HF causal LM loss is averaged over seq_len-1 tokens after shift
@@ -285,6 +300,21 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
             )
             qargs.dataloader = dataloader
         model = quantize_model(model, qargs)
+        torch.cuda.empty_cache()
+
+        # 量化后，重新推断 device map
+        # 清除旧的 hook 与 map，避免 Accelerate 认为已切片
+        remove_hook_from_module(model)
+        remove_hook_from_submodules(model)
+        if hasattr(model, "hf_device_map"):
+            delattr(model, "hf_device_map")
+
+        device_map = infer_auto_device_map(
+            model,
+            max_memory={0: "40GiB", 1: "40GiB", 2: "40GiB", 3: "40GiB", 4: "40GiB", 5: "40GiB", 6: "40GiB", 7: "40GiB"},
+            no_split_module_classes=["LlamaDecoderLayer", "OPTDecoderLayer"],
+        )
+        model = dispatch_model(model, device_map=device_map)
 
         # 可视化
         if args.visualize:
@@ -310,7 +340,8 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
         #model = model.to(device)
         torch.cuda.empty_cache()
     else:
-        model = model.to(device)
+        if not hasattr(model, "hf_device_map"):
+            model = model.to(device)
 
     model.eval()
     return model, tokenizer

@@ -161,54 +161,53 @@ def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor
     code = torch.where(zero_mask, torch.zeros_like(code), code)
     return code
 
-# def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor:
-#     """
-#     跟AxCore学的，做成两步量化。
-#     将浮点张量量化为带次正规支持的 FP 码字，包括 FP4/FP6/FP8.
-#       1) 用 log2 估计指数并生成 scales；
-#       2) 先对幅值按 scales 量化；
-#       3) 再按 FP 编码规则写入指数字段与尾数字段。
-#     """
-#     # 1. 记录符号并处理零
-#     sign = (x < 0).to(torch.uint8)
-#     x_abs = x.abs()
-#     zero_mask = x_abs == 0
-#     x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
+"""
+def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor:
+    # 跟AxCore学的，做成两步量化。
+    # 将浮点张量量化为带次正规支持的 FP 码字，包括 FP4/FP6/FP8.
+    #   1) 用 log2 估计指数并生成 scales；
+    #   2) 先对幅值按 scales 量化；
+    #   3) 再按 FP 编码规则写入指数字段与尾数字段。
+    # 1. 记录符号并处理零
+    sign = (x < 0).to(torch.uint8)
+    x_abs = x.abs()
+    zero_mask = x_abs == 0
+    x_abs_safe = torch.where(zero_mask, torch.full_like(x_abs, 1e-8), x_abs)
 
-#     # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
-#     if (exp_bits == 1 and mant_bits == 2):  # FP4-E1M2，PF6-E3M2, 要将指数clamp为1
-#         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
-#         tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
-#     else:  # 其他FP，PF4-E2M1, FP8.
-#         tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
-#     scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
-#     x_q_abs = torch.round(x_abs_safe / scales) * scales
-#     x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
+    # 2. 依据 _fp_scale 逻辑计算尺度并先量化幅值
+    if (exp_bits == 1 and mant_bits == 2):  # FP4-E1M2，PF6-E3M2, 要将指数clamp为1
+        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+        tensor_log_scales = torch.clamp(tensor_log_scales, min=1)
+    else:  # 其他FP，PF4-E2M1, FP8.
+        tensor_log_scales = (torch.floor(torch.log2(x_abs_safe)) + exp_bias).detach()
+    scales = torch.pow(2.0, tensor_log_scales - mant_bits - exp_bias)
+    x_q_abs = torch.round(x_abs_safe / scales) * scales
+    x_q_abs = torch.where(zero_mask, torch.zeros_like(x_q_abs), x_q_abs)
 
-#     # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
-#     max_exp_field = (1 << exp_bits) - 1
-#     min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
+    # 3. 按 FP 编码生成指数字段与尾数字段（含次正规）
+    max_exp_field = (1 << exp_bits) - 1
+    min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数
 
-#     exp_val = torch.floor(torch.log2(torch.where(x_q_abs == 0, torch.ones_like(x_q_abs), x_q_abs))).to(torch.int32)
-#     is_subnormal = exp_val < min_normal_exp
+    exp_val = torch.floor(torch.log2(torch.where(x_q_abs == 0, torch.ones_like(x_q_abs), x_q_abs))).to(torch.int32)
+    is_subnormal = exp_val < min_normal_exp
 
-#     exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
-#     exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
-#     mant_scale = 1 << mant_bits
-#     mant_normal = torch.round((x_q_abs / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
-#     mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
+    exp_clamped = torch.clamp(exp_val, min_normal_exp, max_exp_field - exp_bias)
+    exp_unbiased = (exp_clamped + exp_bias).to(torch.uint8)
+    mant_scale = 1 << mant_bits
+    mant_normal = torch.round((x_q_abs / torch.pow(2.0, exp_clamped.float()) - 1.0) * mant_scale)
+    mant_normal = mant_normal.clamp(0, mant_scale - 1).to(torch.uint8)
 
-#     subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
-#     mant_sub = torch.round((x_q_abs / subnorm_denom) * mant_scale)
-#     mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
+    subnorm_denom = torch.pow(torch.tensor(2.0, device=x.device), float(min_normal_exp))
+    mant_sub = torch.round((x_q_abs / subnorm_denom) * mant_scale)
+    mant_sub = mant_sub.clamp(0, mant_scale - 1).to(torch.uint8)
 
-#     exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
-#     mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
+    exp_field = torch.where(is_subnormal, torch.zeros_like(exp_unbiased), exp_unbiased)
+    mant_field = torch.where(is_subnormal, mant_sub, mant_normal)
 
-#     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
-#     code = torch.where(zero_mask, torch.zeros_like(code), code)
-#     return code
-
+    code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
+    code = torch.where(zero_mask, torch.zeros_like(code), code)
+    return code
+"""
 
 def _fp_to_float(code: torch.Tensor, exp_bits: int = FP4_EXP_BITS, mant_bits: int = FP4_MANTISSA_BITS, exp_bias: int = FP4_EXP_BIAS) -> torch.Tensor:
     """
@@ -591,16 +590,17 @@ class QuantLinear(nn.Module):
                 dequantized = dequantized_grouped.reshape(weight.shape)
 
             # 缓存码字
+            # 备注：为了节省显存，我之后非必要不缓存码字了
             if self.weight_format == "fp4":
-                self.weight_fp4 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
+                # self.weight_fp4 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
                 self.weight_fp6 = None
                 self.weight_fp8 = None
             elif self.weight_format == "fp6":
-                self.weight_fp6 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
+                # self.weight_fp6 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
                 self.weight_fp4 = None
                 self.weight_fp8 = None
             elif self.weight_format == "fp8":
-                self.weight_fp8 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
+                # self.weight_fp8 = codes.reshape(regroup_shape).t() if regroup_transpose else codes.reshape(weight.shape)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
 
@@ -745,7 +745,7 @@ class QuantLinear(nn.Module):
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
                 # 存 FP4 码字，并写回反量化后的权重便于前向
-                self.weight_fp4 = _reshape_back(fp4_codes)
+                # self.weight_fp4 = _reshape_back(fp4_codes)
                 self.weight_fp6 = None
                 self.weight_fp8 = None
                 dequantized = _fp_to_float(fp4_codes, exp_bits=FP4_EXP_BITS, mant_bits=FP4_MANTISSA_BITS, exp_bias=FP4_EXP_BIAS).to(self.weight.data.dtype) * scales
@@ -795,7 +795,7 @@ class QuantLinear(nn.Module):
                     self.scales = scales.view(-1, 1).half()
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
-                self.weight_fp6 = _reshape_back(fp6_codes)
+                # self.weight_fp6 = _reshape_back(fp6_codes)
                 self.weight_fp4 = None
                 self.weight_fp8 = None
                 dequantized = _fp_to_float(fp6_codes, exp_bits=FP6_EXP_BITS, mant_bits=FP6_MANTISSA_BITS, exp_bias=FP6_EXP_BIAS).to(self.weight.data.dtype) * scales
@@ -845,7 +845,7 @@ class QuantLinear(nn.Module):
                     self.scales = scales.view(-1, 1).half()
                     self.zeros = zeros.view(-1, 1).half() if zeros is not None else None
 
-                self.weight_fp8 = _reshape_back(fp8_codes)
+                # self.weight_fp8 = _reshape_back(fp8_codes)
                 self.weight_fp4 = None
                 self.weight_fp6 = None
                 dequantized = _fp_to_float(fp8_codes, exp_bits=FP8_EXP_BITS, mant_bits=FP8_MANTISSA_BITS, exp_bias=FP8_EXP_BIAS).to(self.weight.data.dtype) * scales
@@ -896,14 +896,14 @@ class QuantLinear(nn.Module):
                     zeros = (-min_val / scales).round().clamp(min_int, max_int)
                 
                 if self.w_group_size == -1:
-                    self.scales = scales.view(1, 1)
-                    self.zeros = zeros.view(1, 1) if not self.symmetric else None
+                    self.scales = scales.view(1, 1).to(weight_tensor.dtype)
+                    self.zeros = zeros.view(1, 1).to(weight_tensor.dtype) if not self.symmetric else None
                 elif self.w_group_size == -2:
-                    self.scales = scales.view(quant_shape[0], 1)
-                    self.zeros = zeros.view(quant_shape[0], 1) if not self.symmetric else None
+                    self.scales = scales.view(quant_shape[0], 1).to(weight_tensor.dtype)
+                    self.zeros = zeros.view(quant_shape[0], 1).to(weight_tensor.dtype) if not self.symmetric else None
                 else:
-                    self.scales = scales.view(-1, 1)
-                    self.zeros = zeros.view(-1, 1) if not self.symmetric else None
+                    self.scales = scales.view(-1, 1).to(weight_tensor.dtype)
+                    self.zeros = zeros.view(-1, 1).to(weight_tensor.dtype) if not self.symmetric else None
 
                 # 量化权重
                 quantized_weight = torch.clamp(
@@ -924,6 +924,9 @@ class QuantLinear(nn.Module):
                 self.weight_fp6 = None
                 self.weight_fp8 = None
                 self.quantized.fill_(True)
+                torch.cuda.empty_cache()
+                del dequantized_weight
+                del quantized_weight
                 return
 
             raise ValueError(f"Unsupported weight_format in quantize_weight: {self.weight_format}")
@@ -988,10 +991,16 @@ class QuantLinear(nn.Module):
             fp4_hi_align_exp_field=fp4_hi_align_exp_field,
             fp4_tail_pad_bits=fp4_tail_pad_bits,
         )
-        # 复制权重和偏置
-        quant_linear.weight.data = linear_layer.weight.data.clone()
+        # 复用原始权重存储，避免额外分配一份大权重
+        quant_linear.weight = nn.Parameter(
+            linear_layer.weight.data.detach(),
+            requires_grad=False,
+        )
         if linear_layer.bias is not None:
-            quant_linear.bias.data = linear_layer.bias.data.clone()
+            quant_linear.bias = nn.Parameter(
+                linear_layer.bias.data.detach(),
+                requires_grad=False,
+            )
 
         # 量化权重
         quant_linear.quantize_weight()
