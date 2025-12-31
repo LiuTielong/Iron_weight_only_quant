@@ -136,7 +136,7 @@ def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor
     min_normal_exp = 1 - exp_bias  # 最小正规数的无偏指数。因为对于有偏指数编码，指数字段从1开始表示正规数。当它取1时，无偏指数就是1-exp_bias。
 
     # 原始无偏指数
-    exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int32)
+    exp_val = torch.floor(torch.log2(x_abs_safe)).to(torch.int8)
 
     # 判定是否为次正规（真实指数低于可表示的正规数最小指数）
     is_subnormal = exp_val < min_normal_exp
@@ -159,6 +159,7 @@ def _float_to_fp(x: torch.Tensor, exp_bits, mant_bits, exp_bias) -> torch.Tensor
     code = (sign << (exp_bits + mant_bits)) | (exp_field << mant_bits) | mant_field
     # 零值强制编码为0，便于解码时恢复0
     code = torch.where(zero_mask, torch.zeros_like(code), code)
+    torch.cuda.empty_cache()
     return code
 
 """
@@ -243,12 +244,14 @@ def _fp_decode_aligned(
     exp_bias: int,
     align_subnorm_exp_as_one: bool = False,
     limit_align_exp_to_field: bool = True,
+    decode_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     通用的 FP 近似解码：
       - 满足对齐条件的码字指数对齐到 hi_align_exp_field，并在尾数右移前按 tail_pad_bits 做补齐/截断。
       - 其他码字按常规方式解码（含次正规）。
     """
+    dtype = decode_dtype if decode_dtype is not None else torch.float32
     code = code.to(torch.uint8)
     zero_mask = code == 0
     sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
@@ -264,8 +267,8 @@ def _fp_decode_aligned(
     else:
         mant_padded = _rounding_rshift(mant_full, abs(tail_pad_bits))
 
-    exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias).float()
-    value_normal = mant_full.float() / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device), exp_unbiased)
+    exp_unbiased = torch.where(exp_field == 0, 1 - exp_bias, exp_field - exp_bias).to(dtype)
+    value_normal = mant_full.to(dtype) / (2.0 ** mant_bits) * torch.pow(torch.tensor(2.0, device=code.device, dtype=dtype), exp_unbiased)
 
     hi_mask = align_exp >= hi_align_start
     if limit_align_exp_to_field:
@@ -292,6 +295,7 @@ def fp_decode_aligned_double_approx(
     exp_bias: int,
     align_subnorm_exp_as_one: bool = False,
     handle_max_outlier: bool = False,
+    decode_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     通用的双近似 FP 解码（4 个一组）：
@@ -301,6 +305,7 @@ def fp_decode_aligned_double_approx(
       - handle_max_outlier=True 时，若组内存在最大指数 outlier，则整组对齐到最大指数。
       - align_subnorm_exp_as_one=True 时，对齐指数将次正规视为1。
     """
+    dtype = decode_dtype if decode_dtype is not None else torch.float32
     code = code.to(torch.uint8).t()
     zero_mask = code == 0
     sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
@@ -351,8 +356,8 @@ def fp_decode_aligned_double_approx(
     mant_left = torch.clamp(mant_left, max=cap)
     mant_aligned = torch.where(shift >= 0, mant_right, mant_left)
 
-    hi_unbiased = target_exp - exp_bias
-    value = mant_aligned.float() / (2.0 ** (mant_bits + tail_pad_bits)) * torch.pow(torch.tensor(2.0, device=code.device), hi_unbiased.float())
+    hi_unbiased = (target_exp - exp_bias).to(dtype)
+    value = mant_aligned.to(dtype) / (2.0 ** (mant_bits + tail_pad_bits)) * torch.pow(torch.tensor(2.0, device=code.device, dtype=dtype), hi_unbiased)
     value = torch.where(sign_groups == 1, -value, value)
     value = torch.where(zero_groups, torch.zeros_like(value), value)
     return value.view(code.shape).t()
@@ -499,6 +504,7 @@ class QuantLinear(nn.Module):
                         exp_bias=FP4_EXP_BIAS,
                         align_subnorm_exp_as_one=True,
                         limit_align_exp_to_field=True,
+                        decode_dtype=self.weight.data.dtype,
                     ).to(self.weight.data.dtype)
                 elif FP4_EXP_BITS == 2:
                     if self.double_approximate:
@@ -512,6 +518,7 @@ class QuantLinear(nn.Module):
                             exp_bias=FP4_EXP_BIAS,
                             align_subnorm_exp_as_one=True,
                             handle_max_outlier=True,
+                            decode_dtype=self.weight.data.dtype,
                         ).to(self.weight.data.dtype)
                     else:
                         decoded = _fp_decode_aligned(
@@ -524,6 +531,7 @@ class QuantLinear(nn.Module):
                             exp_bias=FP4_EXP_BIAS,
                             align_subnorm_exp_as_one=True,
                             limit_align_exp_to_field=True,
+                            decode_dtype=self.weight.data.dtype,
                         ).to(self.weight.data.dtype)
             elif self.weight_format == "fp6":
                 fp_max_value = (1.0 + (2**FP6_MANTISSA_BITS - 1) / (2**FP6_MANTISSA_BITS)) * (2.0 ** ((1 << FP6_EXP_BITS) - 1 - FP6_EXP_BIAS))
@@ -542,6 +550,7 @@ class QuantLinear(nn.Module):
                         exp_bias=FP6_EXP_BIAS,
                         align_subnorm_exp_as_one=True,
                         handle_max_outlier=True,
+                        decode_dtype=self.weight.data.dtype,
                     ).to(self.weight.data.dtype)
                 else:
                     decoded = _fp_decode_aligned(
@@ -554,6 +563,7 @@ class QuantLinear(nn.Module):
                         exp_bias=FP6_EXP_BIAS,
                         align_subnorm_exp_as_one=True,
                         limit_align_exp_to_field=True,
+                        decode_dtype=self.weight.data.dtype,
                     ).to(self.weight.data.dtype)
             elif self.weight_format == "fp8":
                 fp_max_value = (1.0 + (2**FP8_MANTISSA_BITS - 1) / (2**FP8_MANTISSA_BITS)) * (2.0 ** ((1 << FP8_EXP_BITS) - 1 - FP8_EXP_BIAS))
@@ -572,6 +582,7 @@ class QuantLinear(nn.Module):
                         exp_bias=FP8_EXP_BIAS,
                         align_subnorm_exp_as_one=True,
                         handle_max_outlier=True,
+                        decode_dtype=self.weight.data.dtype,
                     ).to(self.weight.data.dtype)
                 else:
                     decoded = _fp_decode_aligned(
@@ -584,6 +595,7 @@ class QuantLinear(nn.Module):
                         exp_bias=FP8_EXP_BIAS,
                         align_subnorm_exp_as_one=True,
                         limit_align_exp_to_field=True,
+                        decode_dtype=self.weight.data.dtype,
                     ).to(self.weight.data.dtype)
             else:
                 raise NotImplementedError("approximate 目前仅支持 fp4/fp6/fp8")

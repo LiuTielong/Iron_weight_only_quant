@@ -1,19 +1,19 @@
 # 对于llama模型，探索6bit量化的情况下，各种数据格式，ppl实验
 # INT6
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 6 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4 --output_file cuda6.json
-# BFP5
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format bfp --w_bits 5 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4 --output_file cuda6.json
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_bits 6 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4 --output_file cuda6.json
+# BFP6
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format bfp --w_bits 6 --w_group_size 64 --w_symmetric --eval_mode ppl --datasets wikitext ptb c4 --output_file cuda6.json
 # FP8-E4M3近似，5bit尾数，分离out
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 4 --fp8_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
-# --fp8_hi_align_start 12 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits 1 --output_file cuda6.json
-# # FP8-E4M3 double近似，5bit尾数
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 4 --fp8_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
-# --fp8_hi_align_start 12 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits 1 --double_approximate --output_file cuda6.json
-# # FP8-E3M4近似，5bit尾数，分离out
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 3 --fp8_mantissa_bits 4 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
-# --fp8_hi_align_start 4 --fp8_hi_align_exp_field 6 --fp8_tail_pad_bits 0 --output_file cuda6.json
-# # FP8-E3M4 double近似，5bit尾数
-# CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 3 --fp8_mantissa_bits 4 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 4 --fp8_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 12 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits 1 --output_file cuda6.json
+# FP8-E4M3 double近似，5bit尾数
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 4 --fp8_mantissa_bits 3 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 12 --fp8_hi_align_exp_field 15 --fp8_tail_pad_bits 1 --double_approximate --output_file cuda6.json
+# FP8-E3M4近似，5bit尾数，分离out
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 3 --fp8_mantissa_bits 4 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
+--fp8_hi_align_start 4 --fp8_hi_align_exp_field 6 --fp8_tail_pad_bits 0 --output_file cuda6.json
+# FP8-E3M4 double近似，5bit尾数
+CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 3 --fp8_mantissa_bits 4 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \
 # --fp8_hi_align_start 4 --fp8_hi_align_exp_field 6 --fp8_tail_pad_bits 0 --double_approximate --output_file cuda6.json
 # FP8-E2M5近似，5bit尾数，分离out
 CUDA_VISIBLE_DEVICES=6 python Iron_weight_only_quant/main.py --model_path /home/data/meta-llama/llama2-7b/ --w_format fp8 --w_bits 8 --fp8_exp_bits 2 --fp8_mantissa_bits 5 --w_group_size 64 --w_symmetric --approximate --quant_dim 1 --eval_mode ppl --datasets wikitext ptb c4 \

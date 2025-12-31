@@ -100,19 +100,40 @@ class SequentialPPLEvaluator:
         total_nll = 0.0
         total_tokens = 0
         with torch.no_grad():
-            for i in range(nsamples):
-                chunk = tokens[:, i * self.seqlen:(i + 1) * self.seqlen]
-                if hasattr(self.model, "hf_device_map"):
-                    # 直接送到嵌入所在设备，避免 CPU/设备混用
-                    chunk = chunk.to(device_for_input)
-                else:
-                    chunk = chunk.to(device_for_input)
-                outputs = model(chunk, labels=chunk)
-                chunk_tokens = chunk.size(1)
-                # HF causal LM loss is averaged over seq_len-1 tokens after shift
-                effective_tokens = max(chunk_tokens - 1, 1)
-                total_nll += outputs.loss.item() * effective_tokens
-                total_tokens += effective_tokens
+            # for i in range(nsamples):
+            #     chunk = tokens[:, i * self.seqlen:(i + 1) * self.seqlen]
+            #     if hasattr(self.model, "hf_device_map"):
+            #         # 直接送到嵌入所在设备，避免 CPU/设备混用
+            #         chunk = chunk.to(device_for_input)
+            #     else:
+            #         chunk = chunk.to(device_for_input)
+            #     outputs = model(chunk, labels=chunk)
+            #     chunk_tokens = chunk.size(1)
+            #     # HF causal LM loss is averaged over seq_len-1 tokens after shift
+            #     effective_tokens = max(chunk_tokens - 1, 1)
+            #     total_nll += outputs.loss.item() * effective_tokens
+            #     total_tokens += effective_tokens
+
+            B = 4
+            for start in range(0, nsamples, B):
+                end = min(start + B, nsamples)
+                # 拼一个 batch: [bs, seqlen]
+                batch = torch.cat(
+                    [tokens[:, i * self.seqlen:(i + 1) * self.seqlen] for i in range(start, end)],
+                    dim=0,
+                )
+
+                batch = batch.to(device_for_input, non_blocking=True)
+
+                outputs = model(batch, labels=batch)
+
+                # 现在 batch 里每个样本有效 token 都是 seqlen-1
+                chunk_tokens = batch.size(1)
+                effective_tokens = max(chunk_tokens - 1, 1)  # 通常 = seqlen-1
+                bs = batch.size(0)
+
+                total_nll += outputs.loss.item() * (effective_tokens * bs)
+                total_tokens += effective_tokens * bs
         if total_tokens == 0:
             return float('inf'), 0, nsamples
         ppl = math.exp(total_nll / total_tokens)
@@ -280,6 +301,9 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
         kv_group_size=128,
     )
 
+    # 记录初始 device_map，便于量化后继续保持同样的多卡分布，避免重新推断时收缩到更少的 GPU
+    original_device_map = getattr(model, "hf_device_map", None)
+
     if w_bit < 16:
         print(f"⚙️ Applying quantization: w_bit={w_bit}, group={args.w_group_size}, format={args.w_format}")
         original_device = next(model.parameters()).device
@@ -306,14 +330,18 @@ def build_and_quantize(args: argparse.Namespace, w_bit: int, device: str, calib_
         # 清除旧的 hook 与 map，避免 Accelerate 认为已切片
         remove_hook_from_module(model)
         remove_hook_from_submodules(model)
+        # 优先使用初始分布，避免因模型变小而只占前几张卡导致显存集中
         if hasattr(model, "hf_device_map"):
             delattr(model, "hf_device_map")
 
-        device_map = infer_auto_device_map(
-            model,
-            max_memory={0: "40GiB", 1: "40GiB", 2: "40GiB", 3: "40GiB", 4: "40GiB", 5: "40GiB", 6: "40GiB", 7: "40GiB"},
-            no_split_module_classes=["LlamaDecoderLayer", "OPTDecoderLayer"],
-        )
+        if original_device_map is not None:
+            device_map = original_device_map
+        else:
+            device_map = infer_auto_device_map(
+                model,
+                max_memory={0: "40GiB", 1: "40GiB", 2: "40GiB", 3: "40GiB", 4: "40GiB", 5: "40GiB", 6: "40GiB", 7: "40GiB"},
+                no_split_module_classes=["LlamaDecoderLayer", "OPTDecoderLayer"],
+            )
         model = dispatch_model(model, device_map=device_map)
 
         # 可视化
@@ -447,4 +475,10 @@ def main():
 
 
 if __name__ == "__main__":
+    _t0 = time.time()
     main()
+    _elapsed = time.time() - _t0
+    _hours = int(_elapsed // 3600)
+    _minutes = int((_elapsed % 3600) // 60)
+    _seconds = _elapsed % 60
+    print(f"\n⏱️ Total runtime: {_hours:d}h {_minutes:02d}m {_seconds:05.2f}s")
