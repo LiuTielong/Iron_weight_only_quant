@@ -308,9 +308,9 @@ def fp_decode_aligned_double_approx(
     dtype = decode_dtype if decode_dtype is not None else torch.float32
     code = code.to(torch.uint8).t()
     zero_mask = code == 0
-    sign = ((code >> (exp_bits + mant_bits)) & 0x1).float()
-    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).int()
-    mant_field = (code & ((1 << mant_bits) - 1)).int()
+    sign = ((code >> (exp_bits + mant_bits)) & 0x1).to(torch.int8)
+    exp_field = ((code >> mant_bits) & ((1 << exp_bits) - 1)).to(torch.int8)
+    mant_field = (code & ((1 << mant_bits) - 1)).to(torch.int8)
 
     align_exp = torch.where(exp_field == 0, torch.ones_like(exp_field), exp_field) if align_subnorm_exp_as_one else exp_field
     leading = torch.where(exp_field == 0, torch.zeros_like(exp_field), torch.ones_like(exp_field))
